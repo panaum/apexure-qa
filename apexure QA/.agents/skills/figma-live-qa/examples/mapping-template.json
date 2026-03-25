@@ -1,0 +1,20 @@
+[
+    {
+        "label": "Main Headline",
+        "selector": "h1",
+        "figmaId": "1:10",
+        "notes": "Using the tag selector 'h1' because it is universal."
+    },
+    {
+        "label": "Body Text",
+        "selector": "main p",
+        "figmaId": "1:15",
+        "notes": "Targeting paragraphs inside the main content area."
+    },
+    {
+        "label": "Primary Button",
+        "selector": "a.button, button",
+        "figmaId": "2:5",
+        "notes": "Targeting standard button tags."
+    }
+]

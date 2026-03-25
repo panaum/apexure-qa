@@ -1,6 +1,34 @@
 import type { Express } from "express";
 import { storage } from "./storage";
 import { chromium } from "playwright";
+import pixelmatch from "pixelmatch";
+import { PNG } from "pngjs";
+import sharp from "sharp";
+
+// --- FIGMA CACHE ---
+// Caches Figma API responses for 10 minutes to avoid rate limits
+const figmaCache = new Map<string, { data: any; timestamp: number }>();
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes in ms
+const CACHE_MAX_SIZE = 100; // FIX #7: prevent unbounded memory growth
+
+function getCachedFigma(key: string) {
+  const entry = figmaCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CACHE_TTL) {
+    figmaCache.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function setCachedFigma(key: string, data: any) {
+  // FIX #7: evict oldest entry when cache is full
+  if (figmaCache.size >= CACHE_MAX_SIZE) {
+    const oldestKey = figmaCache.keys().next().value;
+    if (oldestKey) figmaCache.delete(oldestKey);
+  }
+  figmaCache.set(key, { data, timestamp: Date.now() });
+}
 
 // --- HELPERS ---
 function normalizeUrl(url: string | undefined): string | null {
@@ -16,7 +44,8 @@ function parseFigmaUrl(url: string) {
     const fileKey = urlObj.pathname.split('/')[2];
     const nodeId = urlObj.searchParams.get('node-id');
     if (!nodeId) return null;
-    const nodeIdColon = nodeId.replace('-', ':');
+    // FIX #5: intentionally only replace the first hyphen (Figma node IDs are "123-456")
+    const nodeIdColon = nodeId.replace(/-/, ':');
     return { fileKey, nodeId: nodeIdColon, nodeIdRaw: nodeId };
   } catch { return null; }
 }
@@ -29,7 +58,7 @@ function rgbToHex(rgbString: string): string {
     const b = parseInt(rgbMatch[3]).toString(16).padStart(2, '0');
     return `#${r}${g}${b}`.toUpperCase();
   }
-  const rgbaMatch = rgbString.match(/rgba\((\d+),\s*(\d+),\s*[\d.]+\)/);
+  const rgbaMatch = rgbString.match(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*[\d.]+\)/);
   if (rgbaMatch) {
     const r = parseInt(rgbaMatch[1]).toString(16).padStart(2, '0');
     const g = parseInt(rgbaMatch[2]).toString(16).padStart(2, '0');
@@ -53,19 +82,22 @@ function normalizeLineHeight(lineHeight: string, fontSize: string): string {
 // --- FIGMA: extract all text nodes with section info ---
 function extractTextNodesFromFigma(node: any, sectionName: string = 'Section 1', depth: number = 0): any[] {
   const results: any[] = [];
-  const currentSection = (depth <= 2 && (node.type === 'FRAME' || node.type === 'GROUP' || node.type === 'COMPONENT' || node.type === 'INSTANCE'))
-    ? node.name : sectionName;
+  const isContainer = node.type === 'FRAME' || node.type === 'GROUP' ||
+    node.type === 'COMPONENT' || node.type === 'INSTANCE';
+  const currentSection = (isContainer && node.name) ? node.name : sectionName;
 
   if (node.type === 'TEXT') {
     const style = node.style ?? {};
     const fills = node.fills ?? [];
-    const fill = fills[0];
+    const fill = fills.find((f: any) => f.type === 'SOLID' && f.visible !== false);
     const color = fill?.color
       ? `#${Math.round(fill.color.r * 255).toString(16).padStart(2, '0')}${Math.round(fill.color.g * 255).toString(16).padStart(2, '0')}${Math.round(fill.color.b * 255).toString(16).padStart(2, '0')}`
       : "#000000";
+    const text = node.characters?.trim() ?? '';
+    if (!text) return results;
     results.push({
       section: sectionName,
-      text: node.characters ?? '',
+      text,
       fontFamily: style.fontFamily ?? 'Unknown',
       fontSize: style.fontSize ? `${style.fontSize}px` : 'Unknown',
       lineHeight: style.lineHeightPx ? `${Math.round(style.lineHeightPx)}px` : 'Normal',
@@ -81,13 +113,14 @@ function extractTextNodesFromFigma(node: any, sectionName: string = 'Section 1',
   return results;
 }
 
-// --- FIGMA: extract all image nodes with layer name + dimensions ---
+// --- FIGMA: extract all image nodes ---
 function extractImageNodesFromFigma(node: any, sectionName: string = 'Section 1', depth: number = 0): any[] {
   const results: any[] = [];
-  const currentSection = (depth <= 2 && (node.type === 'FRAME' || node.type === 'GROUP' || node.type === 'COMPONENT' || node.type === 'INSTANCE'))
-    ? node.name : sectionName;
+  const isContainer = node.type === 'FRAME' || node.type === 'GROUP' ||
+    node.type === 'COMPONENT' || node.type === 'INSTANCE';
+  const currentSection = (isContainer && node.name) ? node.name : sectionName;
 
-  const hasImageFill = node.fills?.some((f: any) => f.type === 'IMAGE');
+  const hasImageFill = node.fills?.some((f: any) => f.type === 'IMAGE' && f.visible !== false);
   if (hasImageFill) {
     const box = node.absoluteBoundingBox;
     results.push({
@@ -106,130 +139,196 @@ function extractImageNodesFromFigma(node: any, sectionName: string = 'Section 1'
   return results;
 }
 
-// --- FIGMA FETCH ---
-async function fetchFigmaData(fileKey: string, nodeId: string, nodeIdRaw: string, token: string) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const res = await fetch(`https://api.figma.com/v1/files/${fileKey}/nodes?ids=${nodeId}`, {
-      headers: { 'X-Figma-Token': token },
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
-    const data = await res.json();
-    if (data.status === 403 || data.err) throw new Error(`Figma API error: ${data.err || 'Unauthorized'}`);
-    const nodeData = data.nodes[nodeId] || data.nodes[nodeIdRaw];
-    if (!nodeData) throw new Error(`Node not found in Figma response.`);
-    const rootNode = nodeData.document;
-    return {
-      textNodes: extractTextNodesFromFigma(rootNode, rootNode.name || 'Section 1', 0),
-      imageNodes: extractImageNodesFromFigma(rootNode, rootNode.name || 'Section 1', 0),
-    };
-  } catch (error: any) {
-    clearTimeout(timeout);
-    if (error.name === 'AbortError') throw new Error('Figma API request timed out');
-    throw error;
+// --- FIGMA FETCH WITH RETRY ---
+// Handles Figma 429 rate limit responses with exponential backoff
+async function fetchWithRetry(url: string, options: RequestInit, retries = 3, baseDelay = 1000): Promise<Response> {
+  for (let i = 0; i < retries; i++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.status === 429) {
+        const retryAfterRaw = parseInt(res.headers.get('retry-after') || '0');
+        // Figma returns retry-after in ms if > 1000, otherwise treat as seconds
+        const retryAfterMs = retryAfterRaw > 1000 ? retryAfterRaw : retryAfterRaw * 1000;
+        const backoff = baseDelay * Math.pow(2, i); // 1s, 2s, 4s
+        const delay = Math.min(retryAfterMs || backoff, 30000); // cap at 30s
+        console.log(`[Figma] Rate limited — retrying in ${delay}ms (attempt ${i + 1}/${retries})`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      return res;
+    } catch (error: any) {
+      clearTimeout(timeout);
+      if (error.name === 'AbortError') throw new Error('Figma API request timed out');
+      throw error;
+    }
   }
+  throw new Error('Figma API rate limit exceeded — please wait a moment and try again');
 }
 
-// --- WEB FETCH: text ---
-async function fetchWebData(url: string) {
+async function fetchFigmaData(fileKey: string, nodeId: string, nodeIdRaw: string, token: string) {
+  const cacheKey = `${fileKey}:${nodeId}`;
+  const cached = getCachedFigma(cacheKey);
+  if (cached) {
+    console.log(`[Figma Cache] HIT for ${cacheKey}`);
+    return cached;
+  }
+  console.log(`[Figma Cache] MISS for ${cacheKey} — fetching from API`);
+
+  const res = await fetchWithRetry(
+    `https://api.figma.com/v1/files/${fileKey}/nodes?ids=${nodeId}`,
+    { headers: { 'X-Figma-Token': token } }
+  );
+  const data = await res.json();
+  if (data.status === 403 || data.err) throw new Error(`Figma API error: ${data.err || 'Unauthorized'}`);
+  const nodeData = data.nodes[nodeId] || data.nodes[nodeIdRaw];
+  if (!nodeData) throw new Error(`Node not found in Figma response.`);
+  const rootNode = nodeData.document;
+  const result = {
+    textNodes: extractTextNodesFromFigma(rootNode, rootNode.name || 'Section 1', 0),
+    imageNodes: extractImageNodesFromFigma(rootNode, rootNode.name || 'Section 1', 0),
+  };
+  setCachedFigma(cacheKey, result);
+  return result;
+}
+
+// --- WEB FETCH: text + images in ONE browser session ---
+// FIX #1: merged fetchWebData + fetchWebImages to avoid spinning up two browsers for the same URL
+// FIX #2: switched from networkidle (can hang 60s on sites with polling/analytics) to domcontentloaded + short wait
+async function fetchWebDataAndImages(url: string) {
   const browser = await chromium.launch({ headless: true });
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+
+    // FIX #2: domcontentloaded is much faster; 1500ms wait lets JS hydrate
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.evaluate(() => document.fonts.ready);
 
-    // --- ACCORDION FIX: open all accordion panels before scraping ---
-    // Clicks every trigger that controls a collapsed panel, waits briefly for animations
+    // Expand accordions / tabs so hidden text is captured
+    // NOTE: all callbacks use arrow functions — esbuild wraps `function` keywords with __name()
+    // which is not available in the browser context Playwright sends evaluated code to
     await page.evaluate(() => {
-      const triggers = Array.from(document.querySelectorAll<HTMLElement>(
-        // Common accordion trigger patterns across libraries
-        '[data-accordion-target], [data-bs-toggle="collapse"], ' +
-        '[aria-expanded="false"], ' +
-        '.accordion-button.collapsed, ' +
-        '.accordion-header button, ' +
-        '[class*="accordion"] button, ' +
-        '[class*="accordion"] [role="button"], ' +
-        'details:not([open]) > summary'
-      ));
-      triggers.forEach(el => {
-        try { el.click(); } catch { }
-      });
-    });
-
-    // Wait briefly for CSS expand animations to finish
-    await page.waitForTimeout(600);
-
-    const sections = await page.evaluate(() => {
-      const results: any[] = [];
-      const sectionSelectors = ['section', 'main > div', 'article', '[id*="section"]', '[class*="section"]', '[id*="hero"]', '[id*="about"]', '[id*="feature"]', '[id*="contact"]'];
-      let containers: Element[] = [];
-      for (const sel of sectionSelectors) {
-        const found = Array.from(document.querySelectorAll(sel));
-        if (found.length > 0) { containers = found; break; }
-      }
-      if (containers.length === 0) containers = Array.from(document.body.children);
-
-      containers.forEach((container, index) => {
-        const sectionName = container.getAttribute('id') || container.getAttribute('aria-label') || (container as HTMLElement).dataset.section || `Section ${index + 1}`;
-        const textEls = container.querySelectorAll('h1, h2, h3, h4, h5, h6, p, span, li, a, button, label');
-        textEls.forEach((el) => {
-          if (el.querySelector('p, h1, h2, h3, h4, h5, h6, li, div')) return;
-
-          // Use textContent for hidden elements (innerText returns '' when display:none)
-          const computedStyle = window.getComputedStyle(el);
-          const isHidden = computedStyle.display === 'none' || computedStyle.visibility === 'hidden' || computedStyle.opacity === '0';
-
-          // For visible elements use innerText (respects CSS), for hidden use textContent
-          const rawText = isHidden
-            ? el.textContent?.replace(/\s+/g, ' ').trim()
-            : (el as HTMLElement).innerText?.replace(/\s+/g, ' ').trim();
-
-          if (!rawText || rawText.length < 2) return;
-
-          // For hidden elements we still want style info — walk up to find a visible ancestor's styles
-          // but use the element's own computed style for font info
-          results.push({
-            section: sectionName,
-            text: rawText,
-            fontFamily: computedStyle.fontFamily.split(',')[0].replace(/['"]/g, '').trim(),
-            fontSize: computedStyle.fontSize,
-            lineHeight: computedStyle.lineHeight,
-            color: computedStyle.color,
-            // Flag accordion content so we know it was hidden
-            fromAccordion: isHidden,
+      document.querySelectorAll('details:not([open])').forEach((el) => { (el as any).open = true; });
+      const triggerSelectors = [
+        '[aria-expanded="false"]', '[data-accordion-target]', '[data-bs-toggle="collapse"]',
+        '.accordion-button.collapsed', '.accordion-header button',
+        '[class*="accordion"] button', '[class*="accordion"] [role="button"]',
+        '.w-dropdown-toggle', '.w-tab-link:not(.w--current)',
+        '[class*="toggle"]:not(input)', '[class*="trigger"]', '[class*="expand"]',
+        '[role="tab"][aria-selected="false"]',
+      ];
+      triggerSelectors.forEach((sel) => {
+        try {
+          document.querySelectorAll(sel).forEach((el) => {
+            try { (el as any).click(); } catch (e) { }
           });
-        });
+        } catch (e) { }
       });
-      return results;
     });
 
-    return sections.map((item: any) => ({
-      ...item,
-      color: rgbToHex(item.color),
-      lineHeight: normalizeLineHeight(item.lineHeight, item.fontSize)
-    }));
-  } finally {
-    await browser.close();
-  }
-}
+    await page.waitForTimeout(1500);
 
-// --- WEB FETCH: images ---
-async function fetchWebImages(url: string) {
-  const browser = await chromium.launch({ headless: true });
-  try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-    const page = await context.newPage();
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+    // Scroll to trigger lazy-loaded content — arrow functions throughout to avoid esbuild __name issue
+    await page.evaluate(() => {
+      return new Promise<void>((resolve) => {
+        let totalHeight = 0;
+        const distance = 250;
+        const timer = setInterval(() => {
+          window.scrollBy(0, distance);
+          totalHeight += distance;
+          if (totalHeight >= document.body.scrollHeight) {
+            clearInterval(timer);
+            window.scrollTo(0, 0);
+            resolve();
+          }
+        }, 80);
+      });
+    });
+
+    await page.waitForTimeout(800);
+
+    // Wait for images to finish loading
     await page.waitForFunction(
       () => Array.from(document.images).every(img => img.complete),
       { timeout: 5000 }
     ).catch(() => { });
 
+    // Extract text nodes
+    // IMPORTANT: no named const arrow functions inside evaluate — esbuild/tsx wraps them
+    // with __name() which is not defined in the browser context Playwright sends code to.
+    // getSectionLabel is inlined directly into the forEach loop to avoid this.
+    const textResults = await page.evaluate(() => {
+      const items: any[] = [];
+      const seenTexts = new Set<string>();
+
+      const allTextEls = Array.from(
+        document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, button, label, a, span, td, th, blockquote, figcaption')
+      );
+
+      allTextEls.forEach((el) => {
+        const hasBlockChildren = el.querySelector('p, h1, h2, h3, h4, h5, h6, li, div, section, article, blockquote');
+        if (hasBlockChildren) return;
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'script' || tag === 'style' || tag === 'noscript') return;
+        const computedStyle = window.getComputedStyle(el);
+        const isHidden = computedStyle.display === 'none' || computedStyle.visibility === 'hidden' ||
+          parseFloat(computedStyle.opacity) === 0 || (el as HTMLElement).offsetParent === null;
+        const rawText = isHidden
+          ? el.textContent?.replace(/\s+/g, ' ').trim()
+          : (el as HTMLElement).innerText?.replace(/\s+/g, ' ').trim();
+        if (!rawText || rawText.length < 2) return;
+        if (seenTexts.has(rawText)) return;
+        seenTexts.add(rawText);
+
+        // Inline section label — no named const to avoid esbuild __name wrapping
+        let section = 'Page';
+        let cur: Element | null = el.parentElement;
+        let d = 0;
+        while (cur && cur !== document.body && d < 10) {
+          const t = cur.tagName.toLowerCase();
+          if (t === 'header') { section = 'Header'; break; }
+          if (t === 'footer') { section = 'Footer'; break; }
+          if (t === 'nav') { section = 'Navigation'; break; }
+          if (t === 'main') { section = 'Main'; break; }
+          if (t === 'aside') { section = 'Sidebar'; break; }
+          const id = cur.getAttribute('id');
+          if (id && id.length > 1 && !/^\d+$/.test(id)) { section = id; break; }
+          const aria = cur.getAttribute('aria-label');
+          if (aria && aria.length > 1) { section = aria; break; }
+          const ds = (cur as HTMLElement).dataset;
+          const dval = ds?.section || ds?.name || ds?.block;
+          if (dval && dval.length > 1) { section = dval; break; }
+          cur = cur.parentElement;
+          d++;
+        }
+
+        items.push({
+          section,
+          text: rawText,
+          fontFamily: computedStyle.fontFamily.split(',')[0].replace(/['"]/g, '').trim(),
+          fontSize: computedStyle.fontSize,
+          lineHeight: computedStyle.lineHeight,
+          color: computedStyle.color,
+          fromAccordion: isHidden,
+        });
+      });
+      return items;
+    });
+
+    const textNodes = textResults.map((item: any) => ({
+      ...item,
+      color: rgbToHex(item.color),
+      lineHeight: normalizeLineHeight(item.lineHeight, item.fontSize)
+    }));
+
+    // Extract image nodes
     const images = await page.evaluate(() => {
-      const allEls = Array.from(document.querySelectorAll('img, [role="img"], svg, canvas, picture, figure, [style*="background-image"], [class*="image"], [class*="img"], [class*="photo"], [class*="banner"], [class*="avatar"], [class*="logo"], [class*="icon"]'));
+      const allEls = Array.from(document.querySelectorAll(
+        'img, [role="img"], svg, canvas, picture, figure, [style*="background-image"], [class*="image"], [class*="img"], [class*="photo"], [class*="banner"], [class*="avatar"], [class*="logo"], [class*="icon"]'
+      ));
       const seen = new Set<string>();
       const results: any[] = [];
       allEls.forEach(el => {
@@ -239,11 +338,17 @@ async function fetchWebImages(url: string) {
         const key = el.getAttribute('src') || `${Math.round(rect.width)}x${Math.round(rect.height)}@${Math.round(rect.top)}`;
         if (seen.has(key)) return;
         seen.add(key);
-        results.push({ alt: alt.trim(), src: el.getAttribute('src') || null, width: Math.round(rect.width), height: Math.round(rect.height) });
+        results.push({
+          alt: alt.trim(),
+          src: el.getAttribute('src') || null,
+          width: Math.round(rect.width),
+          height: Math.round(rect.height)
+        });
       });
       return results;
     });
-    return images;
+
+    return { textNodes, images };
   } finally {
     await browser.close();
   }
@@ -260,7 +365,6 @@ function compareImages(figmaImages: any[], webImages: any[]) {
     const b = wi.alt.toLowerCase().replace(/[_\s-]+/g, ' ').trim();
     return a === b || a.includes(b) || b.includes(a);
   };
-
   const figmaResults = figmaImages.map(fi => {
     const match = webImages.find(wi => nameMatch(fi, wi) || dimensionMatch(fi, wi));
     return {
@@ -271,19 +375,10 @@ function compareImages(figmaImages: any[], webImages: any[]) {
       matchedBy: match ? (nameMatch(fi, match) && dimensionMatch(fi, match) ? 'name+size' : nameMatch(fi, match) ? 'name' : 'size') : null,
     };
   });
-
   const matchedKeys = new Set(figmaResults.filter(r => r.status === 'present').map(r => r.webSize + '|' + (r.webAlt ?? '')));
   const extraWebImages = webImages
-    .filter(wi => {
-      const key = `${wi.width}x${wi.height}|${wi.alt ?? ''}`;
-      return !matchedKeys.has(key) && wi.width >= 20 && wi.height >= 20;
-    })
-    .map(wi => ({
-      source: 'web', section: null, layerName: null, figmaSize: null,
-      webAlt: wi.alt || null, webSize: `${wi.width}x${wi.height}`,
-      status: 'missing_on_figma', matchedBy: null,
-    }));
-
+    .filter(wi => { const key = `${wi.width}x${wi.height}|${wi.alt ?? ''}`; return !matchedKeys.has(key) && wi.width >= 20 && wi.height >= 20; })
+    .map(wi => ({ source: 'web', section: null, layerName: null, figmaSize: null, webAlt: wi.alt || null, webSize: `${wi.width}x${wi.height}`, status: 'missing_on_figma', matchedBy: null }));
   return [...figmaResults, ...extraWebImages];
 }
 
@@ -291,6 +386,13 @@ function compareImages(figmaImages: any[], webImages: any[]) {
 function compareTextNodes(figmaNodes: any[], webNodes: any[]) {
   const sectionMap: Record<string, any[]> = {};
   const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+
+  // FIX #4: pre-build O(1) exact-match lookup — avoids O(n²) norm() calls on every figma node
+  const webNormMap = new Map<string, any>();
+  for (const wn of webNodes) {
+    webNormMap.set(norm(wn.text), wn);
+  }
+
   const wordSimilarity = (a: string, b: string): number => {
     const STOP_WORDS = new Set(['the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'of', 'is', 'it', 'as']);
     const words = (s: string) => norm(s).split(' ').filter(w => w.length > 3 && !STOP_WORDS.has(w));
@@ -299,15 +401,17 @@ function compareTextNodes(figmaNodes: any[], webNodes: any[]) {
     return wb.filter(w => wa.has(w)).length / Math.max(wa.size, wb.length);
   };
   const lengthRatio = (a: string, b: string) => Math.min(a.length, b.length) / Math.max(a.length, b.length);
+
   const findMatch = (figmaText: string, nodes: any[]) => {
     const fn = norm(figmaText);
-    const exact = nodes.find(wn => norm(wn.text) === fn);
+    // O(1) exact match via pre-built map
+    const exact = webNormMap.get(fn);
     if (exact) return exact;
-    const fuzzy = nodes.find(wn => {
+    // Fall back to fuzzy only when needed
+    return nodes.find(wn => {
       const wn_norm = norm(wn.text);
       return lengthRatio(fn, wn_norm) >= 0.5 && wordSimilarity(fn, wn_norm) >= 0.7;
     });
-    return fuzzy;
   };
 
   for (const fn of figmaNodes) {
@@ -333,11 +437,9 @@ async function extractLinks(url: string): Promise<any[]> {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
     await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
-
     return await page.evaluate((baseUrl) => {
       const links: any[] = [];
       const seen = new Set<string>();
-
       document.querySelectorAll('a[href]').forEach(el => {
         const href = el.getAttribute('href') ?? '';
         if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
@@ -345,13 +447,8 @@ async function extractLinks(url: string): Promise<any[]> {
         try { resolved = new URL(href, baseUrl).href; } catch { }
         if (seen.has(resolved)) return;
         seen.add(resolved);
-        links.push({
-          url: resolved,
-          text: (el as HTMLElement).innerText?.trim().slice(0, 80) || null,
-          type: href.startsWith('mailto:') ? 'mailto' : href.startsWith('tel:') ? 'tel' : resolved.startsWith(baseUrl) ? 'internal' : 'external',
-        });
+        links.push({ url: resolved, text: (el as HTMLElement).innerText?.trim().slice(0, 80) || null, type: href.startsWith('mailto:') ? 'mailto' : href.startsWith('tel:') ? 'tel' : resolved.startsWith(baseUrl) ? 'internal' : 'external' });
       });
-
       document.querySelectorAll('img[src]').forEach(el => {
         const src = el.getAttribute('src') ?? '';
         if (!src || src.startsWith('data:')) return;
@@ -361,7 +458,6 @@ async function extractLinks(url: string): Promise<any[]> {
         seen.add(resolved);
         links.push({ url: resolved, text: el.getAttribute('alt') || null, type: 'image' });
       });
-
       return links;
     }, url);
   } finally {
@@ -370,26 +466,14 @@ async function extractLinks(url: string): Promise<any[]> {
 }
 
 async function checkLink(link: any): Promise<any> {
-  if (link.type === 'mailto' || link.type === 'tel') {
-    return { ...link, status: 'valid', statusCode: null };
-  }
+  if (link.type === 'mailto' || link.type === 'tel') return { ...link, status: 'valid', statusCode: null };
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
-    const res = await fetch(link.url, {
-      method: 'HEAD',
-      signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LinkChecker/1.0)' },
-      redirect: 'follow',
-    });
+    const res = await fetch(link.url, { method: 'HEAD', signal: controller.signal, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LinkChecker/1.0)' }, redirect: 'follow' });
     clearTimeout(timeout);
     if (res.status === 405) {
-      const res2 = await fetch(link.url, {
-        method: 'GET',
-        signal: AbortSignal.timeout(10000),
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LinkChecker/1.0)' },
-        redirect: 'follow',
-      });
+      const res2 = await fetch(link.url, { method: 'GET', signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LinkChecker/1.0)' }, redirect: 'follow' });
       return { ...link, statusCode: res2.status, status: res2.ok ? 'valid' : 'broken' };
     }
     return { ...link, statusCode: res.status, status: res.ok ? 'valid' : 'broken' };
@@ -398,38 +482,72 @@ async function checkLink(link: any): Promise<any> {
   }
 }
 
-// --- SPELL CHECK via LanguageTool ---
-async function checkSpelling(text: string, language: string = 'en-US'): Promise<any[]> {
-  const res = await fetch('https://api.languagetool.org/v2/check', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ text, language, enabledOnly: 'false' }),
-  });
-  if (!res.ok) throw new Error(`LanguageTool API error: ${res.status}`);
-  const data = await res.json();
-  return data.matches.map((m: any) => ({
-    message: m.message,
-    shortMessage: m.shortMessage || null,
-    offset: m.offset,
-    length: m.length,
-    word: text.slice(m.offset, m.offset + m.length),
-    type: m.rule?.issueType ?? 'unknown',
-    category: m.rule?.category?.name ?? 'Unknown',
-    replacements: m.replacements?.slice(0, 3).map((r: any) => r.value) ?? [],
-    context: m.context?.text ?? null,
-  }));
-}
+// --- TEXTGEARS SPELL CHECK ---
+// Free spell check API — 100 requests/day free, very accurate
+async function textGearsSpellCheck(text: string): Promise<any[]> {
+  const apiKey = process.env.TEXTGEARS_API_KEY || 'DEMO';
 
-async function fetchPageText(url: string): Promise<string> {
-  const browser = await chromium.launch({ headless: true });
-  try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-    const page = await context.newPage();
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
-    return await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ').trim());
-  } finally {
-    await browser.close();
+  const cleanText = text
+    .replace(/https?:\/\/[^\s]+/g, ' ')
+    .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, ' ')
+    .replace(/\d+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const CHUNK_SIZE = 1000;
+  const chunks: string[] = [];
+  for (let i = 0; i < cleanText.length; i += CHUNK_SIZE) {
+    let end = i + CHUNK_SIZE;
+    if (end < cleanText.length) {
+      while (end > i && cleanText[end] !== ' ') end--;
+    }
+    chunks.push(cleanText.slice(i, end).trim());
   }
+
+  const allIssues: any[] = [];
+  const seenWords = new Set<string>();
+
+  for (const chunk of chunks) {
+    if (!chunk) continue;
+    try {
+      const params = new URLSearchParams({ text: chunk, language: 'en-US', ai: '1' });
+      if (apiKey !== 'DEMO') params.append('key', apiKey);
+
+      const res = await fetch(`https://api.textgears.com/spelling?${params.toString()}`);
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      if (!data.status || !data.response?.errors) continue;
+
+      data.response.errors.forEach((err: any) => {
+        const word = err.bad ?? '';
+        const wordLower = word.toLowerCase();
+        if (!word || word.length < 4) return;
+        if (seenWords.has(wordLower)) return;
+        seenWords.add(wordLower);
+
+        const suggestions = (err.better ?? []).slice(0, 3);
+        const hasDifferentSuggestion = suggestions.some((s: string) => s.toLowerCase() !== wordLower);
+        if (suggestions.length > 0 && !hasDifferentSuggestion) return;
+
+        allIssues.push({
+          word,
+          type: 'spelling',
+          category: 'Spelling',
+          message: suggestions.length > 0 ? `Did you mean "${suggestions[0]}"?` : `"${word}" may be misspelled`,
+          shortMessage: suggestions.length > 0 ? `Did you mean "${suggestions[0]}"?` : 'Possible misspelling',
+          replacements: suggestions,
+          context: chunk.substring(Math.max(0, chunk.toLowerCase().indexOf(wordLower) - 30), chunk.toLowerCase().indexOf(wordLower) + 50).trim(),
+          offset: err.offset ?? 0,
+          length: word.length,
+        });
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return allIssues;
 }
 
 export async function registerRoutes(app: Express): Promise<void> {
@@ -445,13 +563,15 @@ export async function registerRoutes(app: Express): Promise<void> {
       if (!figmaParsed) throw new Error("Invalid Figma URL. Make sure it includes a node-id parameter.");
       if (!webUrl) throw new Error("Invalid live URL.");
 
-      const [figmaData, webNodes, webImages] = await Promise.all([
+      // FIX #1: single browser session for web — fetches text + images in one page load
+      const [figmaData, webResult] = await Promise.all([
         fetchFigmaData(figmaParsed.fileKey, figmaParsed.nodeId, figmaParsed.nodeIdRaw, figmaToken),
-        fetchWebData(webUrl),
-        fetchWebImages(webUrl),
+        fetchWebDataAndImages(webUrl),
       ]);
 
       const { textNodes: figmaNodes, imageNodes: figmaImages } = figmaData;
+      const { textNodes: webNodes, images: webImages } = webResult;
+
       if (!figmaNodes || figmaNodes.length === 0) throw new Error("No text nodes found in the selected Figma frame.");
       if (!webNodes || webNodes.length === 0) throw new Error("Could not extract text from the live URL.");
 
@@ -509,6 +629,319 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   });
 
+  // --- SEO AUDIT ---
+  app.post("/api/seo-audit", async (req, res) => {
+    try {
+      const { url } = req.body;
+      if (!url) return res.status(400).json({ message: "url is required." });
+      const normalized = normalizeUrl(url);
+      if (!normalized) return res.status(400).json({ message: "Invalid URL." });
+
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+        const page = await context.newPage();
+        await page.goto(normalized, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(1500);
+
+        const getMeta = async (name: string) =>
+          page.$eval(`meta[name="${name}"]`, (el: Element) => (el as HTMLMetaElement).getAttribute('content')).catch(() => null);
+
+        const getMetaProp = async (prop: string) =>
+          page.$eval(`meta[property="${prop}"]`, (el: Element) => (el as HTMLMetaElement).getAttribute('content')).catch(() => null);
+
+        const [
+          title,
+          description, keywords, author, robots, viewport,
+          lang, canonical, charset,
+          ogTitle, ogDescription, ogImage, ogType,
+          twitterCard, twitterTitle, twitterDescription, twitterImage,
+          publisher,
+          h1Count, h2Count, h3Count, h4Count, h5Count, h6Count,
+          h1Text,
+          pageUrl,
+        ] = await Promise.all([
+          page.title(),
+          getMeta('description'), getMeta('keywords'), getMeta('author'), getMeta('robots'), getMeta('viewport'),
+          page.$eval('html', (el: Element) => (el as HTMLElement).lang || null).catch(() => null),
+          page.$eval('link[rel="canonical"]', (el: Element) => (el as HTMLLinkElement).href).catch(() => null),
+          page.$eval('meta[charset]', (el: Element) => el.getAttribute('charset')).catch(() => null),
+          getMetaProp('og:title'), getMetaProp('og:description'), getMetaProp('og:image'), getMetaProp('og:type'),
+          getMeta('twitter:card'), getMeta('twitter:title'), getMeta('twitter:description'), getMeta('twitter:image'),
+          page.$eval('meta[property="article:publisher"]', (el: Element) => (el as HTMLMetaElement).getAttribute('content')).catch(() => getMeta('publisher')),
+          page.locator('h1').count(),
+          page.locator('h2').count(),
+          page.locator('h3').count(),
+          page.locator('h4').count(),
+          page.locator('h5').count(),
+          page.locator('h6').count(),
+          page.$eval('h1', (el: Element) => (el as HTMLElement).innerText?.trim() || null).catch(() => null),
+          page.url(),
+        ]);
+
+        // FIX #3: parallelise image attribute fetching — was sequential (up to 60 awaits)
+        const imageHandles = await page.$$('img');
+        const imageDetails = await Promise.all(
+          imageHandles.slice(0, 20).map(async (img) => {
+            const [src, alt, dims] = await Promise.all([
+              img.getAttribute('src').catch(() => null),
+              img.getAttribute('alt').catch(() => null),
+              img.evaluate((el: Element) => {
+                const i = el as HTMLImageElement;
+                return { w: i.naturalWidth || i.width || 0, h: i.naturalHeight || i.height || 0 };
+              }).catch(() => ({ w: 0, h: 0 })),
+            ]);
+            return { src, alt, width: dims.w || null, height: dims.h || null, hasAlt: !!(alt && alt.trim()) };
+          })
+        );
+        const imagesWithoutAlt = imageDetails.filter(i => !i.hasAlt).length;
+        const totalImages = await page.locator('img').count();
+
+        const totalLinks = await page.locator('a[href]').count();
+        const internalLinks = await page.evaluate((baseUrl: string) => {
+          return Array.from(document.querySelectorAll('a[href]')).filter((a) => {
+            try { return new URL((a as HTMLAnchorElement).href).hostname === new URL(baseUrl).hostname; }
+            catch { return false; }
+          }).length;
+        }, normalized);
+        const externalLinks = totalLinks - internalLinks;
+
+        const seoData = {
+          url: pageUrl,
+          title: title || null,
+          description, keywords, author, robots, lang,
+          canonical, publisher, viewport, charset,
+          og: { title: ogTitle, description: ogDescription, image: ogImage, type: ogType },
+          twitter: { card: twitterCard, title: twitterTitle, description: twitterDescription, image: twitterImage },
+          headings: { h1: h1Count, h2: h2Count, h3: h3Count, h4: h4Count, h5: h5Count, h6: h6Count, h1Text },
+          images: { total: totalImages, withoutAlt: imagesWithoutAlt, items: imageDetails },
+          links: { total: totalLinks, internal: internalLinks, external: externalLinks },
+        };
+
+        const issues: { type: 'error' | 'warning' | 'pass'; field: string; message: string }[] = [];
+
+        if (!seoData.title) issues.push({ type: 'error', field: 'Title', message: 'Title tag is missing' });
+        else if (seoData.title.length < 30) issues.push({ type: 'warning', field: 'Title', message: `Title is too short (${seoData.title.length} chars, recommended 30-60)` });
+        else if (seoData.title.length > 60) issues.push({ type: 'warning', field: 'Title', message: `Title is too long (${seoData.title.length} chars, recommended 30-60)` });
+        else issues.push({ type: 'pass', field: 'Title', message: `Title length is good (${seoData.title.length} chars)` });
+
+        if (!seoData.description) issues.push({ type: 'error', field: 'Description', message: 'Meta description is missing' });
+        else if (seoData.description.length < 70) issues.push({ type: 'warning', field: 'Description', message: `Description is too short (${seoData.description.length} chars, recommended 70-160)` });
+        else if (seoData.description.length > 160) issues.push({ type: 'warning', field: 'Description', message: `Description is too long (${seoData.description.length} chars, recommended 70-160)` });
+        else issues.push({ type: 'pass', field: 'Description', message: `Description length is good (${seoData.description.length} chars)` });
+
+        if (!seoData.keywords) issues.push({ type: 'warning', field: 'Keywords', message: 'Keywords meta tag is missing' });
+        else issues.push({ type: 'pass', field: 'Keywords', message: 'Keywords meta tag is present' });
+
+        if (!seoData.canonical) issues.push({ type: 'warning', field: 'Canonical', message: 'Canonical URL is not defined' });
+        else issues.push({ type: 'pass', field: 'Canonical', message: 'Canonical URL is defined' });
+
+        if (!seoData.robots) issues.push({ type: 'warning', field: 'Robots Tag', message: 'Robots meta tag is not defined' });
+        else issues.push({ type: 'pass', field: 'Robots Tag', message: `Robots: ${seoData.robots}` });
+
+        if (!seoData.author) issues.push({ type: 'warning', field: 'Author', message: 'Author meta tag is missing' });
+        else issues.push({ type: 'pass', field: 'Author', message: `Author: ${seoData.author}` });
+
+        if (!seoData.lang) issues.push({ type: 'warning', field: 'Language', message: 'Page language is not defined' });
+        else issues.push({ type: 'pass', field: 'Language', message: `Language: ${seoData.lang}` });
+
+        if (seoData.headings.h1 === 0) issues.push({ type: 'error', field: 'H1', message: 'No H1 tag found on the page' });
+        else if (seoData.headings.h1 > 1) issues.push({ type: 'warning', field: 'H1', message: `Multiple H1 tags found (${seoData.headings.h1}) — should have only one` });
+        else issues.push({ type: 'pass', field: 'H1', message: `H1 is present: "${seoData.headings.h1Text}"` });
+
+        if (seoData.images.withoutAlt > 0) issues.push({ type: 'warning', field: 'Images', message: `${seoData.images.withoutAlt} image(s) missing alt text` });
+        else issues.push({ type: 'pass', field: 'Images', message: 'All images have alt text' });
+
+        const socialImage = seoData.og.image || seoData.twitter.image;
+        if (!socialImage) issues.push({ type: 'warning', field: 'Social Image', message: 'No social share image found (og:image or twitter:image missing)' });
+        else issues.push({ type: 'pass', field: 'Social Image', message: 'Social share image is present' });
+
+        if (!seoData.viewport) issues.push({ type: 'error', field: 'Viewport', message: 'Viewport meta tag is missing — page may not be mobile friendly' });
+        else issues.push({ type: 'pass', field: 'Viewport', message: 'Viewport meta tag is present' });
+
+        const errors = issues.filter(i => i.type === 'error').length;
+        const warnings = issues.filter(i => i.type === 'warning').length;
+        const passes = issues.filter(i => i.type === 'pass').length;
+        const score = Math.round((passes / issues.length) * 100);
+
+        res.json({ ...seoData, issues, score, errors, warnings, passes });
+      } finally {
+        await browser.close();
+      }
+    } catch (error: any) {
+      console.error('SEO audit error:', error);
+      res.status(500).json({ message: error.message || 'An unexpected error occurred.' });
+    }
+  });
+
+  // --- TECH STACK DETECTOR ---
+  app.post("/api/tech-stack", async (req, res) => {
+    try {
+      const { url } = req.body;
+      if (!url) return res.status(400).json({ message: "url is required." });
+      const normalized = normalizeUrl(url);
+      if (!normalized) return res.status(400).json({ message: "Invalid URL." });
+
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+        const page = await context.newPage();
+
+        const headers: Record<string, string> = {};
+        page.on('response', response => {
+          if (response.url() === normalized) {
+            const h = response.headers();
+            Object.assign(headers, h);
+          }
+        });
+
+        await page.goto(normalized, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(2000);
+
+        const techData = await page.evaluate(() => {
+          const scripts = Array.from(document.querySelectorAll('script[src]')).map((s) => (s as HTMLScriptElement).src);
+          const allScripts = document.documentElement.innerHTML;
+          const metas = Array.from(document.querySelectorAll('meta')).map((m) => ({
+            name: m.getAttribute('name') || m.getAttribute('property') || '',
+            content: m.getAttribute('content') || '',
+          }));
+          const links = Array.from(document.querySelectorAll('link')).map((l) => (l as HTMLLinkElement).href);
+          const classes = document.documentElement.className + ' ' + document.body.className;
+          const win = window as any;
+
+          return {
+            scripts, allScripts, metas, links, classes,
+            hasReact: !!(win.React || win.__REACT_DEVTOOLS_GLOBAL_HOOK__),
+            hasVue: !!(win.Vue || win.__vue_app__),
+            hasAngular: !!(win.angular || win.getAllAngularRootElements),
+            hasJQuery: !!(win.jQuery || win.$?.fn?.jquery),
+            hasGTM: !!(win.google_tag_manager || allScripts.includes('googletagmanager.com')),
+            hasGA: !!(win.ga || win.gtag || allScripts.includes('google-analytics.com') || allScripts.includes('googletagmanager.com')),
+            hasHotjar: !!(win.hj || allScripts.includes('hotjar.com')),
+            hasFBPixel: !!(win.fbq || allScripts.includes('connect.facebook.net')),
+            hasIntercom: !!(win.Intercom || allScripts.includes('intercom.io')),
+            hasHubspot: !!(win._hsq || allScripts.includes('hubspot.com') || allScripts.includes('hs-scripts.com')),
+            hasMailchimp: !!(allScripts.includes('mailchimp.com') || allScripts.includes('list-manage.com')),
+            hasZendesk: !!(win.zE || allScripts.includes('zendesk.com')),
+            hasCrisp: !!(win.$crisp || allScripts.includes('crisp.chat')),
+            hasTidio: !!(allScripts.includes('tidio.co')),
+            hasWebflow: !!(allScripts.includes('webflow.com') || document.querySelector('[data-wf-site]') || document.querySelector('[data-wf-page]')),
+            hasWordPress: !!(allScripts.includes('wp-content') || allScripts.includes('wp-includes') || document.querySelector('meta[name="generator"][content*="WordPress"]')),
+            hasShopify: !!(win.Shopify || allScripts.includes('shopify.com') || allScripts.includes('cdn.shopify.com')),
+            hasSquarespace: !!(allScripts.includes('squarespace.com') || win.Squarespace),
+            hasWix: !!(allScripts.includes('wix.com') || allScripts.includes('wixstatic.com')),
+            hasFramer: !!(allScripts.includes('framer.com') || allScripts.includes('framerusercontent.com')),
+            hasGhostCMS: !!(allScripts.includes('ghost.io') || document.querySelector('meta[name="generator"][content*="Ghost"]')),
+            hasDrupal: !!(win.Drupal || allScripts.includes('/sites/default/files/')),
+            hasJoomla: !!(allScripts.includes('/media/jui/') || win.Joomla),
+            hasTailwind: !!(allScripts.includes('tailwind') || document.querySelector('[class*="bg-"]')),
+            hasBootstrap: !!(allScripts.includes('bootstrap') || document.querySelector('.container.row') !== null),
+            hasNextJS: !!(win.__NEXT_DATA__ || allScripts.includes('/_next/')),
+            hasNuxtJS: !!(win.__NUXT__ || allScripts.includes('/_nuxt/')),
+            hasGatsbyJS: !!(win.___gatsby || allScripts.includes('/static/gatsby')),
+            hasGoogleFonts: !!(allScripts.includes('fonts.googleapis.com') || allScripts.includes('fonts.gstatic.com')),
+            hasCloudflare: !!(allScripts.includes('cloudflare.com') || allScripts.includes('cdn-cgi')),
+            hasVercel: !!(allScripts.includes('vercel.app') || allScripts.includes('_vercel')),
+            hasNetlify: !!(allScripts.includes('netlify.com') || allScripts.includes('netlify.app')),
+            hasAWS: !!(allScripts.includes('amazonaws.com') || allScripts.includes('cloudfront.net')),
+            hasRecaptcha: !!(allScripts.includes('recaptcha') || allScripts.includes('hcaptcha')),
+            hasSentry: !!(win.Sentry || allScripts.includes('sentry.io')),
+            hasStripe: !!(win.Stripe || allScripts.includes('stripe.com')),
+            hasTypekit: !!(allScripts.includes('typekit.net') || allScripts.includes('use.typekit')),
+            hasCookiebot: !!(allScripts.includes('cookiebot.com') || win.Cookiebot),
+            hasOneTrust: !!(allScripts.includes('onetrust.com') || win.OneTrust),
+            hasTikTokPixel: !!(allScripts.includes('tiktok.com') && allScripts.includes('pixel')),
+            hasLinkedInInsight: !!(allScripts.includes('snap.licdn.com') || allScripts.includes('linkedin.com/insight')),
+            hasGoogleAds: !!(allScripts.includes('googleadservices.com') || allScripts.includes('google.com/pagead')),
+            hasMixpanel: !!(win.mixpanel || allScripts.includes('mixpanel.com')),
+            hasSegment: !!(win.analytics?.initialize || allScripts.includes('segment.com') || allScripts.includes('segment.io')),
+            hasAmplitude: !!(win.amplitude || allScripts.includes('amplitude.com')),
+            hasLiveChat: !!(win.LiveChatWidget || allScripts.includes('livechat.com')),
+            hasTypeform: !!(allScripts.includes('typeform.com')),
+            hasCalendly: !!(allScripts.includes('calendly.com')),
+            hasCapterra: !!(allScripts.includes('capterra.com')),
+            hasDrift: !!(win.drift || allScripts.includes('drift.com')),
+          };
+        });
+
+        const detected: { name: string; category: string; icon: string }[] = [];
+
+        if (techData.hasWebflow) detected.push({ name: 'Webflow', category: 'CMS', icon: '🌊' });
+        if (techData.hasWordPress) detected.push({ name: 'WordPress', category: 'CMS', icon: '📝' });
+        if (techData.hasShopify) detected.push({ name: 'Shopify', category: 'E-commerce', icon: '🛒' });
+        if (techData.hasSquarespace) detected.push({ name: 'Squarespace', category: 'CMS', icon: '◻' });
+        if (techData.hasWix) detected.push({ name: 'Wix', category: 'CMS', icon: '🔷' });
+        if (techData.hasFramer) detected.push({ name: 'Framer', category: 'CMS', icon: '🎨' });
+        if (techData.hasGhostCMS) detected.push({ name: 'Ghost', category: 'CMS', icon: '👻' });
+        if (techData.hasDrupal) detected.push({ name: 'Drupal', category: 'CMS', icon: '💧' });
+        if (techData.hasJoomla) detected.push({ name: 'Joomla', category: 'CMS', icon: '🔥' });
+        if (techData.hasReact) detected.push({ name: 'React', category: 'JavaScript Framework', icon: '⚛' });
+        if (techData.hasVue) detected.push({ name: 'Vue.js', category: 'JavaScript Framework', icon: '💚' });
+        if (techData.hasAngular) detected.push({ name: 'Angular', category: 'JavaScript Framework', icon: '🅰' });
+        if (techData.hasNextJS) detected.push({ name: 'Next.js', category: 'JavaScript Framework', icon: '▲' });
+        if (techData.hasNuxtJS) detected.push({ name: 'Nuxt.js', category: 'JavaScript Framework', icon: '💚' });
+        if (techData.hasGatsbyJS) detected.push({ name: 'Gatsby', category: 'JavaScript Framework', icon: '💜' });
+        if (techData.hasJQuery) detected.push({ name: 'jQuery', category: 'JavaScript Library', icon: '📦' });
+        if (techData.hasTailwind) detected.push({ name: 'Tailwind CSS', category: 'CSS Framework', icon: '🎨' });
+        if (techData.hasBootstrap) detected.push({ name: 'Bootstrap', category: 'CSS Framework', icon: '🅱' });
+        if (techData.hasGA) detected.push({ name: 'Google Analytics', category: 'Analytics', icon: '📊' });
+        if (techData.hasGTM) detected.push({ name: 'Google Tag Manager', category: 'Tag Manager', icon: '🏷' });
+        if (techData.hasHotjar) detected.push({ name: 'Hotjar', category: 'Analytics', icon: '🔥' });
+        if (techData.hasMixpanel) detected.push({ name: 'Mixpanel', category: 'Analytics', icon: '📈' });
+        if (techData.hasSegment) detected.push({ name: 'Segment', category: 'Analytics', icon: '📡' });
+        if (techData.hasAmplitude) detected.push({ name: 'Amplitude', category: 'Analytics', icon: '📉' });
+        if (techData.hasFBPixel) detected.push({ name: 'Facebook Pixel', category: 'Advertising', icon: '📘' });
+        if (techData.hasGoogleAds) detected.push({ name: 'Google Ads', category: 'Advertising', icon: '🎯' });
+        if (techData.hasTikTokPixel) detected.push({ name: 'TikTok Pixel', category: 'Advertising', icon: '🎵' });
+        if (techData.hasLinkedInInsight) detected.push({ name: 'LinkedIn Insight', category: 'Advertising', icon: '💼' });
+        if (techData.hasHubspot) detected.push({ name: 'HubSpot', category: 'CRM / Marketing', icon: '🧡' });
+        if (techData.hasMailchimp) detected.push({ name: 'Mailchimp', category: 'Email Marketing', icon: '🐒' });
+        if (techData.hasIntercom) detected.push({ name: 'Intercom', category: 'Live Chat', icon: '💬' });
+        if (techData.hasZendesk) detected.push({ name: 'Zendesk', category: 'Support', icon: '🎧' });
+        if (techData.hasCrisp) detected.push({ name: 'Crisp', category: 'Live Chat', icon: '💬' });
+        if (techData.hasTidio) detected.push({ name: 'Tidio', category: 'Live Chat', icon: '💬' });
+        if (techData.hasDrift) detected.push({ name: 'Drift', category: 'Live Chat', icon: '💬' });
+        if (techData.hasLiveChat) detected.push({ name: 'LiveChat', category: 'Live Chat', icon: '💬' });
+        if (techData.hasCalendly) detected.push({ name: 'Calendly', category: 'Scheduling', icon: '📅' });
+        if (techData.hasTypeform) detected.push({ name: 'Typeform', category: 'Forms', icon: '📋' });
+        if (techData.hasStripe) detected.push({ name: 'Stripe', category: 'Payments', icon: '💳' });
+        if (techData.hasGoogleFonts) detected.push({ name: 'Google Fonts', category: 'Fonts', icon: '🔤' });
+        if (techData.hasTypekit) detected.push({ name: 'Adobe Fonts', category: 'Fonts', icon: '🔤' });
+        if (techData.hasCloudflare) detected.push({ name: 'Cloudflare', category: 'CDN / Security', icon: '🛡' });
+        if (techData.hasVercel) detected.push({ name: 'Vercel', category: 'Hosting', icon: '▲' });
+        if (techData.hasNetlify) detected.push({ name: 'Netlify', category: 'Hosting', icon: '🟩' });
+        if (techData.hasAWS) detected.push({ name: 'AWS / CloudFront', category: 'Hosting', icon: '☁' });
+        if (techData.hasRecaptcha) detected.push({ name: 'reCAPTCHA', category: 'Security', icon: '🔒' });
+        if (techData.hasCookiebot) detected.push({ name: 'Cookiebot', category: 'Cookie Consent', icon: '🍪' });
+        if (techData.hasOneTrust) detected.push({ name: 'OneTrust', category: 'Cookie Consent', icon: '🍪' });
+        if (techData.hasSentry) detected.push({ name: 'Sentry', category: 'Error Tracking', icon: '🐛' });
+
+        const server = headers['server'] || headers['x-powered-by'] || null;
+        if (server) {
+          if (server.toLowerCase().includes('nginx')) detected.push({ name: 'Nginx', category: 'Web Server', icon: '🌐' });
+          if (server.toLowerCase().includes('apache')) detected.push({ name: 'Apache', category: 'Web Server', icon: '🌐' });
+          if (server.toLowerCase().includes('cloudflare')) {
+            if (!detected.find(d => d.name === 'Cloudflare')) detected.push({ name: 'Cloudflare', category: 'CDN / Security', icon: '🛡' });
+          }
+        }
+
+        const grouped: Record<string, { name: string; category: string; icon: string }[]> = {};
+        detected.forEach(tech => {
+          if (!grouped[tech.category]) grouped[tech.category] = [];
+          grouped[tech.category].push(tech);
+        });
+
+        res.json({ url: normalized, total: detected.length, technologies: detected, grouped });
+      } finally {
+        await browser.close();
+      }
+    } catch (error: any) {
+      console.error('Tech stack error:', error);
+      res.status(500).json({ message: error.message || 'An unexpected error occurred.' });
+    }
+  });
+
+  // --- SPELL CHECK ---
   app.post("/api/spell-check", async (req, res) => {
     try {
       const { url, language = 'en-US' } = req.body;
@@ -516,36 +949,127 @@ export async function registerRoutes(app: Express): Promise<void> {
       const normalized = normalizeUrl(url);
       if (!normalized) return res.status(400).json({ message: "Invalid URL." });
 
-      const pageText = await fetchPageText(normalized);
-      const CHUNK_SIZE = 20000;
-      const chunks: string[] = [];
-      for (let i = 0; i < pageText.length; i += CHUNK_SIZE) {
-        chunks.push(pageText.slice(i, i + CHUNK_SIZE));
+      // FIX #8: use domcontentloaded — we only need body text, not full asset load
+      const browser = await chromium.launch({ headless: true });
+      let pageText = '';
+      try {
+        const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+        const page = await context.newPage();
+        await page.goto(normalized, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(1000);
+        pageText = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ').trim());
+      } finally {
+        await browser.close();
       }
 
-      const allIssues: any[] = [];
-      let offset = 0;
-      for (const chunk of chunks) {
-        const issues = await checkSpelling(chunk, language);
-        allIssues.push(...issues.map(i => ({ ...i, offset: i.offset + offset })));
-        offset += chunk.length;
-      }
+      const issues = await textGearsSpellCheck(pageText);
 
       const byCategory: Record<string, number> = {};
-      allIssues.forEach(i => { byCategory[i.category] = (byCategory[i.category] || 0) + 1; });
+      issues.forEach(i => { byCategory[i.category] = (byCategory[i.category] || 0) + 1; });
 
       res.json({
         url: normalized,
         language,
-        totalIssues: allIssues.length,
-        spelling: allIssues.filter(i => i.category === 'Possible Typo' || i.type === 'misspelling').length,
-        grammar: allIssues.filter(i => i.type === 'grammar').length,
-        style: allIssues.filter(i => i.type === 'style').length,
+        engine: 'textgears',
+        totalIssues: issues.length,
+        spelling: issues.filter(i => i.type === 'spelling').length,
+        grammar: 0,
+        style: 0,
         byCategory,
-        issues: allIssues,
+        issues,
       });
     } catch (error: any) {
       console.error('Spell check error:', error);
+      res.status(500).json({ message: error.message || 'An unexpected error occurred.' });
+    }
+  });
+
+  // --- SCREENSHOT DIFF ---
+  app.post("/api/screenshot-diff", async (req, res) => {
+    try {
+      const { figmaUrl, figmaToken, liveUrl } = req.body;
+      if (!figmaUrl || !figmaToken || !liveUrl) return res.status(400).json({ message: "figmaUrl, figmaToken, and liveUrl are all required." });
+      if (typeof figmaToken !== 'string' || figmaToken.trim().length === 0) return res.status(400).json({ message: "Invalid Figma token." });
+
+      const figmaParsed = parseFigmaUrl(figmaUrl);
+      const webUrl = normalizeUrl(liveUrl);
+      if (!figmaParsed) throw new Error("Invalid Figma URL. Make sure it includes a node-id parameter.");
+      if (!webUrl) throw new Error("Invalid live URL.");
+
+      // Step 1: Get Figma image export URL
+      const figmaImgRes = await fetchWithRetry(
+        `https://api.figma.com/v1/images/${figmaParsed.fileKey}?ids=${figmaParsed.nodeId}&format=png&scale=1`,
+        { headers: { 'X-Figma-Token': figmaToken } }
+      );
+      const figmaImgData = await figmaImgRes.json();
+      if (figmaImgData.err) throw new Error(`Figma image export error: ${figmaImgData.err}`);
+      const figmaImageUrl = figmaImgData.images?.[figmaParsed.nodeId] || figmaImgData.images?.[figmaParsed.nodeIdRaw];
+      if (!figmaImageUrl) throw new Error('Figma image export returned no image URL for this node.');
+
+      // Step 2: Download the actual PNG bytes from the pre-signed S3 URL
+      const figmaDownloadRes = await fetch(figmaImageUrl);
+      if (!figmaDownloadRes.ok) throw new Error('Failed to download Figma image from export URL.');
+      const figmaImageBuffer = Buffer.from(await figmaDownloadRes.arrayBuffer());
+
+      // Step 3: Screenshot the live page with Playwright
+      const VIEWPORT = { width: 1440, height: 900 };
+      let liveScreenshotBuffer: Buffer;
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const context = await browser.newContext({ viewport: VIEWPORT });
+        const page = await context.newPage();
+        await page.goto(webUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(1500);
+        liveScreenshotBuffer = Buffer.from(await page.screenshot({ fullPage: true, type: 'png' }));
+      } finally {
+        await browser.close();
+      }
+
+      // Step 4: Resize both images to the same dimensions using sharp
+      const liveMeta = await sharp(liveScreenshotBuffer).metadata();
+      const targetWidth = liveMeta.width!;
+      const targetHeight = liveMeta.height!;
+
+      const figmaResized = await sharp(figmaImageBuffer)
+        .resize(targetWidth, targetHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+        .png()
+        .toBuffer();
+
+      const liveResized = await sharp(liveScreenshotBuffer)
+        .resize(targetWidth, targetHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+        .png()
+        .toBuffer();
+
+      // Step 5: Decode PNGs and run pixelmatch
+      const figmaPng = PNG.sync.read(figmaResized);
+      const livePng = PNG.sync.read(liveResized);
+      const diffPng = new PNG({ width: targetWidth, height: targetHeight });
+
+      const mismatchPixels = pixelmatch(
+        figmaPng.data,
+        livePng.data,
+        diffPng.data,
+        targetWidth,
+        targetHeight,
+        { threshold: 0.1, diffColor: [255, 0, 0] }
+      );
+
+      const totalPixels = targetWidth * targetHeight;
+      const mismatchPercentage = parseFloat(((mismatchPixels / totalPixels) * 100).toFixed(2));
+
+      const diffBuffer = PNG.sync.write(diffPng);
+
+      res.json({
+        figmaImage: `data:image/png;base64,${figmaResized.toString('base64')}`,
+        liveImage: `data:image/png;base64,${liveResized.toString('base64')}`,
+        diffImage: `data:image/png;base64,${diffBuffer.toString('base64')}`,
+        mismatchPercentage,
+        mismatchPixels,
+        totalPixels,
+        viewport: `${targetWidth}x${targetHeight}`,
+      });
+    } catch (error: any) {
+      console.error('Screenshot diff error:', error);
       res.status(500).json({ message: error.message || 'An unexpected error occurred.' });
     }
   });
