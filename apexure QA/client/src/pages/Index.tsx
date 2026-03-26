@@ -3,10 +3,9 @@ import { DashboardHeader } from "@/components/dashboard/DashboardHeader";
 import { HeroSection } from "@/components/dashboard/HeroSection";
 import { ScanInputs } from "@/components/dashboard/ScanInputs";
 import { DashboardFooter } from "@/components/dashboard/DashboardFooter";
+import { PageSpeedTab } from "@/components/dashboard/PageSpeedTab";
 import { toast } from "sonner";
-
-type ActiveTab = "compare" | "screenshotdiff" | "spellcheck" | "seo" | "techstack";
-
+type ActiveTab = "compare" | "screenshotdiff" | "spellcheck" | "seo" | "techstack" | "pagespeed";
 const Index = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("compare");
 
@@ -39,6 +38,11 @@ const Index = () => {
   const [isScreenshotDiffing, setIsScreenshotDiffing] = useState(false);
   const [screenshotDiffResults, setScreenshotDiffResults] = useState<any>(null);
   const [diffViewMode, setDiffViewMode] = useState<"sidebyside" | "overlay" | "diffonly">("sidebyside");
+
+  // --- PageSpeed state ---
+  const [psiUrl, setPsiUrl] = useState("");
+  const [isPsiLoading, setIsPsiLoading] = useState(false);
+  const [psiResults, setPsiResults] = useState<any>(null);
 
   const handleRunScan = async () => {
     if (!figmaUrl || !figmaToken || !webUrl) {
@@ -246,6 +250,12 @@ const Index = () => {
           >
             Tech Stack
           </button>
+          <button
+            onClick={() => setActiveTab("pagespeed")}
+            className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "pagespeed" ? "bg-primary text-white shadow" : "text-muted-foreground hover:text-white"}`}
+          >
+            PageSpeed
+          </button>
         </div>
 
         {/* ===== COMPARE TAB ===== */}
@@ -382,13 +392,12 @@ const Index = () => {
                     <p className="text-xs text-muted-foreground mt-0.5">Pixel-level comparison at {screenshotDiffResults.viewport}</p>
                   </div>
                   <div className="ml-auto">
-                    <span className={`text-lg font-bold px-3 py-1 rounded border ${
-                      screenshotDiffResults.mismatchPercentage < 5
+                    <span className={`text-lg font-bold px-3 py-1 rounded border ${screenshotDiffResults.mismatchPercentage < 5
                         ? "bg-green-500/20 text-green-400 border-green-500/30"
                         : screenshotDiffResults.mismatchPercentage <= 15
-                        ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/30"
-                        : "bg-red-500/20 text-red-400 border-red-500/30"
-                    }`}>
+                          ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/30"
+                          : "bg-red-500/20 text-red-400 border-red-500/30"
+                      }`}>
                       {screenshotDiffResults.mismatchPercentage}% mismatch
                     </span>
                   </div>
@@ -450,11 +459,10 @@ const Index = () => {
                 {/* Stat cards */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="rounded-xl border border-white/10 bg-white/5 p-5 text-center">
-                    <div className={`text-3xl font-bold ${
-                      screenshotDiffResults.mismatchPercentage < 5 ? "text-green-400"
+                    <div className={`text-3xl font-bold ${screenshotDiffResults.mismatchPercentage < 5 ? "text-green-400"
                         : screenshotDiffResults.mismatchPercentage <= 15 ? "text-yellow-400"
-                        : "text-red-400"
-                    }`}>{screenshotDiffResults.mismatchPercentage}%</div>
+                          : "text-red-400"
+                      }`}>{screenshotDiffResults.mismatchPercentage}%</div>
                     <div className="text-xs text-muted-foreground mt-1 uppercase tracking-widest font-bold">Mismatch</div>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/5 p-5 text-center">
@@ -863,6 +871,18 @@ const Index = () => {
               </div>
             )}
           </>
+        )}
+
+        {/* ===== PAGESPEED TAB ===== */}
+        {activeTab === "pagespeed" && (
+          <PageSpeedTab
+            psiUrl={psiUrl}
+            setPsiUrl={setPsiUrl}
+            psiResults={psiResults}
+            setPsiResults={setPsiResults}
+            isPsiLoading={isPsiLoading}
+            setIsPsiLoading={setIsPsiLoading}
+          />
         )}
 
       </main>

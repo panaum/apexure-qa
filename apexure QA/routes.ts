@@ -1073,4 +1073,198 @@ export async function registerRoutes(app: Express): Promise<void> {
       res.status(500).json({ message: error.message || 'An unexpected error occurred.' });
     }
   });
-}
+
+  // --- PAGESPEED INSIGHTS ---
+  app.post("/api/pagespeed", async (req, res) => {
+    try {
+      const { url, strategy = "mobile" } = req.body;
+      if (!url) return res.status(400).json({ message: "url is required." });
+      const normalized = normalizeUrl(url);
+      if (!normalized) return res.status(400).json({ message: "Invalid URL." });
+
+      const apiKey = process.env.GOOGLE_PSI_API_KEY || "";
+      const categories = ["performance", "accessibility", "best-practices", "seo"];
+      const params = new URLSearchParams({
+        url: normalized,
+        strategy: strategy === "desktop" ? "desktop" : "mobile",
+      });
+      categories.forEach(c => params.append("category", c));
+      if (apiKey) params.append("key", apiKey);
+
+      const psiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?${params.toString()}`;
+      console.log(`[PSI] Fetching ${strategy} report for ${normalized}`);
+
+      const psiRes = await fetch(psiUrl, { signal: AbortSignal.timeout(120000) });
+      if (!psiRes.ok) {
+        const errBody = await psiRes.json().catch(() => ({}));
+        throw new Error(errBody?.error?.message || `PSI API returned ${psiRes.status}`);
+      }
+      const psi = await psiRes.json();
+
+      // --- Extract category scores ---
+      const lhCategories = psi.lighthouseResult?.categories ?? {};
+      const scores: Record<string, number | null> = {};
+      for (const cat of categories) {
+        const key = cat;
+        scores[key] = lhCategories[key]?.score != null ? Math.round(lhCategories[key].score * 100) : null;
+      }
+
+      // --- Extract field data (CrUX) ---
+      const fieldMetricsRaw = psi.loadingExperience?.metrics ?? {};
+      const fieldData: Record<string, any> = {};
+      const fieldKeys: Record<string, string> = {
+        LARGEST_CONTENTFUL_PAINT_MS: "LCP",
+        INTERACTION_TO_NEXT_PAINT: "INP",
+        CUMULATIVE_LAYOUT_SHIFT_SCORE: "CLS",
+        FIRST_CONTENTFUL_PAINT_MS: "FCP",
+        FIRST_INPUT_DELAY_MS: "FID",
+      };
+      for (const [rawKey, label] of Object.entries(fieldKeys)) {
+        const m = fieldMetricsRaw[rawKey];
+        if (m) {
+          fieldData[label] = {
+            percentile: m.percentile,
+            category: m.category, // FAST / AVERAGE / SLOW
+            distributions: m.distributions,
+          };
+        }
+      }
+      const fieldOverallCategory = psi.loadingExperience?.overall_category ?? null;
+
+      // --- Extract lab metrics ---
+      const audits = psi.lighthouseResult?.audits ?? {};
+      const labMetricKeys: Record<string, string> = {
+        "first-contentful-paint": "FCP",
+        "largest-contentful-paint": "LCP",
+        "total-blocking-time": "TBT",
+        "cumulative-layout-shift": "CLS",
+        "speed-index": "Speed Index",
+      };
+      const labMetrics: Record<string, any> = {};
+      for (const [auditId, label] of Object.entries(labMetricKeys)) {
+        const a = audits[auditId];
+        if (a) {
+          labMetrics[label] = {
+            displayValue: a.displayValue ?? null,
+            numericValue: a.numericValue ?? null,
+            score: a.score != null ? Math.round(a.score * 100) : null,
+          };
+        }
+      }
+
+      // --- Extract opportunities & diagnostics ---
+      const auditRefs = psi.lighthouseResult?.categories?.performance?.auditRefs ?? [];
+      const opportunityIds = auditRefs.filter((r: any) => r.group === "load-opportunities").map((r: any) => r.id);
+      const diagnosticIds = auditRefs.filter((r: any) => r.group === "diagnostics").map((r: any) => r.id);
+
+      const extractAuditItems = (ids: string[]) =>
+        ids
+          .map((id: string) => audits[id])
+          .filter((a: any) => a && a.score !== null && a.score < 1)
+          .map((a: any) => ({
+            id: a.id,
+            title: a.title,
+            description: a.description,
+            score: a.score != null ? Math.round(a.score * 100) : null,
+            displayValue: a.displayValue ?? null,
+            numericValue: a.numericValue ?? null,
+            details: a.details ?? null,
+          }));
+
+      const opportunities = extractAuditItems(opportunityIds);
+      const diagnostics = extractAuditItems(diagnosticIds);
+
+      // --- Extract image optimization audit items ---
+      const imageAuditIds = ["uses-optimized-images", "modern-image-formats", "uses-responsive-images"];
+      const imageItems: any[] = [];
+      const seenUrls = new Set<string>();
+      for (const auditId of imageAuditIds) {
+        const audit = audits[auditId];
+        if (!audit?.details?.items) continue;
+        for (const item of audit.details.items) {
+          const imgUrl = item.url || item.node?.snippet?.match(/src="([^"]+)"/)?.[1];
+          if (!imgUrl || seenUrls.has(imgUrl)) continue;
+          seenUrls.add(imgUrl);
+          const totalBytes = item.totalBytes ?? item.wastedBytes ?? 0;
+          const wastedBytes = item.wastedBytes ?? 0;
+          const optimizedBytes = totalBytes > 0 ? totalBytes - wastedBytes : 0;
+          imageItems.push({
+            url: imgUrl,
+            sourceAudit: auditId,
+            totalBytes,
+            wastedBytes,
+            optimizedBytes: optimizedBytes > 0 ? optimizedBytes : null,
+            mimeType: item.mimeType ?? null,
+            displayedWidth: item.node?.boundingRect?.width ?? null,
+            displayedHeight: item.node?.boundingRect?.height ?? null,
+            naturalWidth: item.width ?? null,
+            naturalHeight: item.height ?? null,
+            label: item.node?.nodeLabel ?? null,
+            weightLifted: totalBytes > 0 ? parseFloat(((wastedBytes / totalBytes) * 100).toFixed(1)) : 0,
+          });
+        }
+      }
+
+      // Sort by wastedBytes descending for quick-wins pinning
+      imageItems.sort((a, b) => b.wastedBytes - a.wastedBytes);
+
+      // --- Quick Wins: top 3 heaviest items across all opportunities ---
+      const allItems: any[] = [];
+      for (const opp of opportunities) {
+        if (opp.details?.items) {
+          for (const item of opp.details.items) {
+            allItems.push({
+              source: opp.title,
+              url: item.url ?? null,
+              totalBytes: item.totalBytes ?? 0,
+              wastedBytes: item.wastedBytes ?? 0,
+              label: item.node?.nodeLabel ?? item.label ?? null,
+            });
+          }
+        }
+      }
+      allItems.sort((a, b) => b.wastedBytes - a.wastedBytes);
+      const quickWins = allItems.slice(0, 3);
+
+      res.json({
+        url: normalized,
+        strategy,
+        scores,
+        fieldData,
+        fieldOverallCategory,
+        labMetrics,
+        opportunities,
+        diagnostics,
+        imageItems,
+        quickWins,
+        fetchTime: psi.lighthouseResult?.fetchTime ?? null,
+        finalUrl: psi.lighthouseResult?.finalUrl ?? normalized,
+      });
+    } catch (error: any) {
+      console.error("PSI error:", error);
+      res.status(500).json({ message: error.message || "An unexpected error occurred." });
+    }
+  }); // closes /api/pagespeed try/finally
+  // --- Image Optimizer Route ---
+  app.post("/api/pagespeed/optimize-image", async (req, res) => {
+    try {
+      const { imageUrl, format = "webp" } = req.body;
+      if (!imageUrl) return res.status(400).json({ message: "imageUrl is required." });
+
+      const imgRes = await fetch(imageUrl as string);
+      if (!imgRes.ok) return res.status(400).json({ message: "Failed to fetch image." });
+
+      const originalBuffer = Buffer.from(await imgRes.arrayBuffer());
+      const optimizedBuffer = await sharp(originalBuffer)
+        .toFormat(format as keyof sharp.FormatEnum, { quality: 80 })
+        .toBuffer();
+
+      res.setHeader("Content-Type", `image/${format}`);
+      res.send(optimizedBuffer);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      res.status(500).json({ message: msg });
+    }
+  });
+
+} // closes registerRoutes
