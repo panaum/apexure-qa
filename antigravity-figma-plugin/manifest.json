@@ -1,0 +1,19 @@
+{
+  "name": "Antigravity QA Bridge",
+  "id": "antigravity-qa-bridge",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": [
+    "figma"
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "http://localhost:3333"
+    ],
+    "reasoning": "Sends Figma node data to a local QA bridge server for design comparison",
+    "devAllowedDomains": [
+      "http://localhost:3333"
+    ]
+  }
+}

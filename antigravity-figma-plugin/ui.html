@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+
+<body>
+    <script>
+        window.addEventListener('message', async (event) => {
+            const msg = event.data.pluginMessage;
+            if (!msg || msg.type !== 'send-data') return;
+
+            try {
+                const response = await fetch('http://localhost:3333/figma-data', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(msg.payload)
+                });
+
+                if (response.ok) {
+                    parent.postMessage({ pluginMessage: { type: 'success' } }, '*');
+                } else {
+                    parent.postMessage({ pluginMessage: { type: 'error' } }, '*');
+                }
+            } catch (e) {
+                parent.postMessage({ pluginMessage: { type: 'error', message: e.message } }, '*');
+            }
+        });
+    </script>
+</body>
+
+</html>

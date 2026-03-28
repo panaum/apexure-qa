@@ -4,8 +4,9 @@ import { HeroSection } from "@/components/dashboard/HeroSection";
 import { ScanInputs } from "@/components/dashboard/ScanInputs";
 import { DashboardFooter } from "@/components/dashboard/DashboardFooter";
 import { PageSpeedTab } from "@/components/dashboard/PageSpeedTab";
+import QAPanel from "@/components/QAPanel";
 import { toast } from "sonner";
-type ActiveTab = "compare" | "screenshotdiff" | "spellcheck" | "seo" | "techstack" | "pagespeed";
+type ActiveTab = "compare" | "screenshotdiff" | "spellcheck" | "seo" | "techstack" | "pagespeed" | "designsentinel";
 const Index = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("compare");
 
@@ -255,6 +256,12 @@ const Index = () => {
             className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "pagespeed" ? "bg-primary text-white shadow" : "text-muted-foreground hover:text-white"}`}
           >
             PageSpeed
+          </button>
+          <button
+            onClick={() => setActiveTab("designsentinel")}
+            className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "designsentinel" ? "bg-primary text-white shadow" : "text-muted-foreground hover:text-white"}`}
+          >
+            🛡️ Design Sentinel
           </button>
         </div>
 
@@ -883,6 +890,11 @@ const Index = () => {
             isPsiLoading={isPsiLoading}
             setIsPsiLoading={setIsPsiLoading}
           />
+        )}
+
+        {/* ===== DESIGN SENTINEL TAB ===== */}
+        {activeTab === "designsentinel" && (
+          <QAPanel />
         )}
 
       </main>

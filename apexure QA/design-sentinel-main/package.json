@@ -1,0 +1,15 @@
+{
+  "name": "design-sentinel-main",
+  "version": "1.0.0",
+  "description": "Design Sentinel backend — Figma bridge + comparison engine",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "playwright": "^1.49.0"
+  }
+}
