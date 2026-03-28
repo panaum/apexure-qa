@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { startBridge, getLatestFigmaData } = require('./bridge');
 const { compare } = require('./compare');
+const { runAccessibilityCheck } = require('./accessibility');
 
 const app = express();
 const PORT = 3334;
@@ -28,6 +29,23 @@ app.post('/compare', async (req, res) => {
   } catch (err) {
     console.error('[Server] Comparison error:', err.message);
     res.status(500).json({ error: `Comparison failed: ${err.message}` });
+  }
+});
+
+app.post('/accessibility', async (req, res) => {
+  const { url } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: 'Missing "url" in request body' });
+  }
+
+  try {
+    console.log(`[Server] Running accessibility check against: ${url}`);
+    const result = await runAccessibilityCheck(url);
+    console.log(`[Server] Accessibility check complete: ${result.summary.passed} passed, ${result.summary.failed} failed, ${result.summary.warned} warned`);
+    res.json(result);
+  } catch (err) {
+    console.error('[Server] Accessibility check error:', err.message);
+    res.status(500).json({ error: `Accessibility check failed: ${err.message}` });
   }
 });
 

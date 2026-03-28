@@ -5,8 +5,9 @@ import { ScanInputs } from "@/components/dashboard/ScanInputs";
 import { DashboardFooter } from "@/components/dashboard/DashboardFooter";
 import { PageSpeedTab } from "@/components/dashboard/PageSpeedTab";
 import QAPanel from "@/components/QAPanel";
+import AccessibilityPanel from "@/components/AccessibilityPanel";
 import { toast } from "sonner";
-type ActiveTab = "compare" | "screenshotdiff" | "spellcheck" | "seo" | "techstack" | "pagespeed" | "designsentinel";
+type ActiveTab = "compare" | "screenshotdiff" | "spellcheck" | "seo" | "techstack" | "pagespeed" | "designsentinel" | "accessibility";
 const Index = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("compare");
 
@@ -262,6 +263,12 @@ const Index = () => {
             className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "designsentinel" ? "bg-primary text-white shadow" : "text-muted-foreground hover:text-white"}`}
           >
             🛡️ Design Sentinel
+          </button>
+          <button
+            onClick={() => setActiveTab("accessibility")}
+            className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "accessibility" ? "bg-primary text-white shadow" : "text-muted-foreground hover:text-white"}`}
+          >
+            ♿ Accessibility
           </button>
         </div>
 
@@ -895,6 +902,11 @@ const Index = () => {
         {/* ===== DESIGN SENTINEL TAB ===== */}
         {activeTab === "designsentinel" && (
           <QAPanel />
+        )}
+
+        {/* ===== ACCESSIBILITY TAB ===== */}
+        {activeTab === "accessibility" && (
+          <AccessibilityPanel />
         )}
 
       </main>
