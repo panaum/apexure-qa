@@ -7,6 +7,17 @@
   "editorType": [
     "figma"
   ],
+  "documentAccess": "dynamic-page",
+  "menu": [
+    {
+      "name": "Send Node Data (Design Sentinel)",
+      "command": "nodes"
+    },
+    {
+      "name": "Export Frame (Screenshot Diff)",
+      "command": "export"
+    }
+  ],
   "networkAccess": {
     "allowedDomains": [
       "http://localhost:3333"

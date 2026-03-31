@@ -3,12 +3,15 @@ const cors = require('cors');
 const { startBridge, getLatestFigmaData } = require('./bridge');
 const { compare } = require('./compare');
 const { runAccessibilityCheck } = require('./accessibility');
+const { generateAccessibilitySummary } = require('./aiSummary');
+const { generateSEORecommendations } = require('./seoAiSummary');
 
 const app = express();
 const PORT = 3334;
 
 app.use(cors({ origin: ['http://localhost:5000', 'http://localhost:5173', 'http://localhost:3000'] }));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 app.post('/compare', async (req, res) => {
   const { url } = req.body;
@@ -46,6 +49,30 @@ app.post('/accessibility', async (req, res) => {
   } catch (err) {
     console.error('[Server] Accessibility check error:', err.message);
     res.status(500).json({ error: `Accessibility check failed: ${err.message}` });
+  }
+});
+
+app.post('/ai-summary', async (req, res) => {
+  try {
+    console.log('[Server] Generating AI summary...');
+    const summaryText = await generateAccessibilitySummary(req.body);
+    console.log('[Server] AI summary generated successfully');
+    res.json({ summary: summaryText });
+  } catch (err) {
+    console.error('[Server] AI summary error:', err.message);
+    res.status(500).json({ error: `AI summary failed: ${err.message}` });
+  }
+});
+
+app.post('/seo-ai-recommendations', async (req, res) => {
+  try {
+    console.log('[Server] Generating SEO AI recommendations...');
+    const recommendations = await generateSEORecommendations(req.body);
+    console.log('[Server] SEO AI recommendations generated successfully');
+    res.json({ recommendations });
+  } catch (err) {
+    console.error('[Server] SEO AI recommendations error:', err.message);
+    res.status(500).json({ error: `SEO AI recommendations failed: ${err.message}` });
   }
 });
 

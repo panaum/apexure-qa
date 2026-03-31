@@ -1,16 +1,10 @@
 const { chromium } = require('playwright');
 
-/**
- * Convert Figma fill color {r, g, b} (already 0-255 ints from plugin) to hex string.
- */
 function rgbToHex(r, g, b) {
   const toHex = (v) => Math.round(v).toString(16).padStart(2, '0');
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
-/**
- * Parse a CSS color string (rgb, rgba, or hex) to {r, g, b}.
- */
 function parseCssColor(colorStr) {
   if (!colorStr) return null;
   const rgbMatch = colorStr.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
@@ -29,51 +23,24 @@ function parseCssColor(colorStr) {
   return null;
 }
 
-/**
- * Parse a CSS font-weight string to a numeric/string value for comparison.
- */
 function normalizeFontWeight(weight) {
-  const map = {
-    normal: '400',
-    bold: '700',
-    lighter: '300',
-    bolder: '700',
-  };
+  const map = { normal: '400', bold: '700', lighter: '300', bolder: '700' };
   const w = String(weight).toLowerCase().trim();
   return map[w] || w;
 }
 
-/**
- * Normalize Figma fontWeight (style string like "Bold", "Regular", etc.) to numeric.
- */
 function normalizeFigmaFontWeight(style) {
   if (!style) return '400';
   const map = {
-    thin: '100',
-    extralight: '200',
-    'extra light': '200',
-    ultralight: '200',
-    light: '300',
-    regular: '400',
-    normal: '400',
-    medium: '500',
-    semibold: '600',
-    'semi bold': '600',
-    demibold: '600',
-    bold: '700',
-    extrabold: '800',
-    'extra bold': '800',
-    ultrabold: '800',
-    black: '900',
-    heavy: '900',
+    thin: '100', extralight: '200', 'extra light': '200', ultralight: '200',
+    light: '300', regular: '400', normal: '400', medium: '500',
+    semibold: '600', 'semi bold': '600', demibold: '600', bold: '700',
+    extrabold: '800', 'extra bold': '800', ultrabold: '800', black: '900', heavy: '900',
   };
   const s = String(style).toLowerCase().trim();
   return map[s] || '400';
 }
 
-/**
- * Parse a CSS pixel value to a number.
- */
 function parsePx(value) {
   if (typeof value === 'number') return value;
   if (!value) return null;
@@ -81,74 +48,171 @@ function parsePx(value) {
   return match ? parseFloat(match[1]) : null;
 }
 
-/**
- * Compare Figma data against a live URL.
- * @param {object} figmaPayload - FigmaPayload with nodes array
- * @param {string} liveUrl - The live URL to scrape
- * @returns {object} CompareResult
- */
+function normalizeForMatching(str) {
+  return str
+    .replace(/\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function compare(figmaPayload, liveUrl) {
   const textNodes = figmaPayload.nodes.filter((n) => n.type === 'TEXT' && n.content);
   const mismatches = [];
 
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.goto(liveUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+      ],
+    });
 
-    for (const node of textNodes) {
-      const content = node.content.trim();
-      if (!content) continue;
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      viewport: { width: 1440, height: 900 },
+    });
 
-      // Find best matching DOM element by text content
-      const elementData = await page.evaluate((searchText) => {
-        const walker = document.createTreeWalker(
-          document.body,
-          NodeFilter.SHOW_TEXT,
-          null
-        );
+    const page = await context.newPage();
 
-        let bestElement = null;
-        let bestScore = 0;
+    await page.goto(liveUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
 
-        while (walker.nextNode()) {
-          const textNode = walker.currentNode;
-          const parent = textNode.parentElement;
-          if (!parent) continue;
+    await page.evaluate(async () => {
+      await new Promise((resolve) => {
+        let totalHeight = 0;
+        const distance = 300;
+        const timer = setInterval(() => {
+          window.scrollBy(0, distance);
+          totalHeight += distance;
+          if (totalHeight >= document.body.scrollHeight) {
+            clearInterval(timer);
+            window.scrollTo(0, 0);
+            resolve();
+          }
+        }, 100);
+      });
+    });
 
-          const text = textNode.textContent.trim();
-          if (!text) continue;
+    await page.waitForTimeout(2000);
 
-          // Exact match gets highest score
-          if (text === searchText) {
-            bestElement = parent;
-            bestScore = 100;
-            break;
+    await page.evaluate(async () => {
+      const images = Array.from(document.querySelectorAll('img'));
+      await Promise.all(
+        images
+          .filter((img) => !img.complete)
+          .map((img) => new Promise((resolve) => {
+            img.onload = resolve;
+            img.onerror = resolve;
+          }))
+      );
+    });
+
+    // ── PARALLELISED COMPARISON ─────────────────────────────────
+    const evaluationResults = await Promise.all(
+      textNodes.map(async (node) => {
+        const rawContent = node.content.trim();
+        const content = normalizeForMatching(rawContent);
+        if (!content || content.length < 2) return { node, elementData: null, skipped: true };
+
+        const elementData = await page.evaluate((searchText) => {
+
+          const semanticTags = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'SPAN', 'A', 'BUTTON', 'LI', 'LABEL'];
+
+          function findDeepestTextElement(el, targetText) {
+            if (semanticTags.includes(el.tagName)) return el;
+            for (const tag of semanticTags) {
+              const children = el.querySelectorAll(tag.toLowerCase());
+              for (const child of children) {
+                if ((child.textContent || '').trim().includes(targetText.slice(0, 30))) {
+                  return child;
+                }
+              }
+            }
+            return el;
           }
 
-          // Contains match
-          if (text.includes(searchText) || searchText.includes(text)) {
-            const score = Math.min(text.length, searchText.length) / Math.max(text.length, searchText.length) * 80;
+          function resolveFontSize(el) {
+            const size = window.getComputedStyle(el).fontSize;
+            if (size.endsWith('px')) return size;
+            const tmp = document.createElement('div');
+            tmp.style.cssText = `font-size:${size};position:absolute;visibility:hidden`;
+            document.body.appendChild(tmp);
+            const resolved = window.getComputedStyle(tmp).fontSize;
+            document.body.removeChild(tmp);
+            return resolved;
+          }
+
+          const allElements = document.querySelectorAll(
+            'p, h1, h2, h3, h4, h5, h6, span, div, li, a, button, label, td, th'
+          );
+
+          let bestElement = null;
+          let bestScore = 0;
+
+          for (const el of allElements) {
+            const style = window.getComputedStyle(el);
+            if (
+              style.display === 'none' ||
+              style.visibility === 'hidden' ||
+              style.opacity === '0'
+            ) continue;
+
+            if (el.children.length > 8) continue;
+
+            const rawText = (el.textContent || '')
+              .replace(/\n/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+
+            if (!rawText || rawText.length < 2) continue;
+
+            let score = 0;
+
+            if (rawText === searchText) {
+              score = 100;
+            } else if (searchText.length > 60 && rawText.includes(searchText.slice(0, 80))) {
+              score = 85;
+            } else if (rawText.includes(searchText)) {
+              score = 70;
+            } else if (searchText.includes(rawText) && rawText.length > 3) {
+              score = (rawText.length / searchText.length) * 60;
+            }
+
             if (score > bestScore) {
               bestScore = score;
-              bestElement = parent;
+              bestElement = el;
             }
+
+            if (score === 100) break;
           }
-        }
 
-        if (!bestElement || bestScore < 30) return null;
+          if (!bestElement || bestScore < 25) return null;
 
-        const style = window.getComputedStyle(bestElement);
-        return {
-          fontSize: style.fontSize,
-          fontFamily: style.fontFamily,
-          fontWeight: style.fontWeight,
-          color: style.color,
-          lineHeight: style.lineHeight,
-          textContent: bestElement.textContent.trim(),
-        };
-      }, content);
+          const actualElement = findDeepestTextElement(bestElement, searchText);
+          const elStyle = window.getComputedStyle(actualElement);
+          const resolvedFontSize = resolveFontSize(actualElement);
+
+          return {
+            fontSize: resolvedFontSize,
+            fontFamily: elStyle.fontFamily,
+            fontWeight: elStyle.fontWeight,
+            color: elStyle.color,
+            lineHeight: elStyle.lineHeight,
+            textContent: actualElement.textContent.trim(),
+            matchScore: bestScore,
+          };
+        }, content);
+
+        return { node, content, elementData };
+      })
+    );
+
+    // ── PROCESS RESULTS ─────────────────────────────────────────
+    for (const { node, content, elementData, skipped } of evaluationResults) {
+      if (skipped) continue;
 
       if (!elementData) {
         mismatches.push({
@@ -166,23 +230,11 @@ async function compare(figmaPayload, liveUrl) {
       if (node.fontSize !== undefined) {
         const liveFontSize = parsePx(elementData.fontSize);
         const figmaFontSize = node.fontSize;
-        if (liveFontSize !== null && liveFontSize !== figmaFontSize) {
+        if (liveFontSize !== null) {
           mismatches.push({
-            nodeId: node.id,
-            nodeName: node.name,
-            property: 'fontSize',
-            figmaValue: `${figmaFontSize}px`,
-            liveValue: `${liveFontSize}px`,
-            status: 'fail',
-          });
-        } else if (liveFontSize !== null) {
-          mismatches.push({
-            nodeId: node.id,
-            nodeName: node.name,
-            property: 'fontSize',
-            figmaValue: `${figmaFontSize}px`,
-            liveValue: `${liveFontSize}px`,
-            status: 'pass',
+            nodeId: node.id, nodeName: node.name, property: 'fontSize',
+            figmaValue: `${figmaFontSize}px`, liveValue: `${liveFontSize}px`,
+            status: liveFontSize !== figmaFontSize ? 'fail' : 'pass',
           });
         }
       }
@@ -190,18 +242,12 @@ async function compare(figmaPayload, liveUrl) {
       // Compare fontFamily
       if (node.fontFamily) {
         const liveFontFamily = elementData.fontFamily
-          .split(',')[0]
-          .trim()
-          .replace(/['"]/g, '');
+          .split(',')[0].trim().replace(/['"]/g, '');
         const figmaFamily = node.fontFamily.trim();
-        const match = liveFontFamily.toLowerCase() === figmaFamily.toLowerCase();
         mismatches.push({
-          nodeId: node.id,
-          nodeName: node.name,
-          property: 'fontFamily',
-          figmaValue: figmaFamily,
-          liveValue: liveFontFamily,
-          status: match ? 'pass' : 'fail',
+          nodeId: node.id, nodeName: node.name, property: 'fontFamily',
+          figmaValue: figmaFamily, liveValue: liveFontFamily,
+          status: liveFontFamily.toLowerCase() === figmaFamily.toLowerCase() ? 'pass' : 'fail',
         });
       }
 
@@ -210,11 +256,8 @@ async function compare(figmaPayload, liveUrl) {
         const liveWeight = normalizeFontWeight(elementData.fontWeight);
         const figmaWeight = normalizeFigmaFontWeight(node.fontWeight);
         mismatches.push({
-          nodeId: node.id,
-          nodeName: node.name,
-          property: 'fontWeight',
-          figmaValue: figmaWeight,
-          liveValue: liveWeight,
+          nodeId: node.id, nodeName: node.name, property: 'fontWeight',
+          figmaValue: figmaWeight, liveValue: liveWeight,
           status: liveWeight === figmaWeight ? 'pass' : 'fail',
         });
       }
@@ -229,21 +272,12 @@ async function compare(figmaPayload, liveUrl) {
           const dr = Math.abs(figmaColor.r - liveColor.r);
           const dg = Math.abs(figmaColor.g - liveColor.g);
           const db = Math.abs(figmaColor.b - liveColor.b);
-
           let status = 'pass';
-          if (dr > 2 || dg > 2 || db > 2) {
-            status = 'fail';
-          } else if (dr > 0 || dg > 0 || db > 0) {
-            status = 'warn';
-          }
-
+          if (dr > 2 || dg > 2 || db > 2) status = 'fail';
+          else if (dr > 0 || dg > 0 || db > 0) status = 'warn';
           mismatches.push({
-            nodeId: node.id,
-            nodeName: node.name,
-            property: 'color',
-            figmaValue: figmaHex,
-            liveValue: liveHex,
-            status,
+            nodeId: node.id, nodeName: node.name, property: 'color',
+            figmaValue: figmaHex, liveValue: liveHex, status,
           });
         }
       }
@@ -255,22 +289,16 @@ async function compare(figmaPayload, liveUrl) {
         if (liveLineHeight !== null) {
           const diff = Math.abs(liveLineHeight - figmaLineHeight);
           let status = 'pass';
-          if (diff > 1) {
-            status = 'fail';
-          } else if (diff > 0) {
-            status = 'warn';
-          }
+          if (diff > 1) status = 'fail';
+          else if (diff > 0) status = 'warn';
           mismatches.push({
-            nodeId: node.id,
-            nodeName: node.name,
-            property: 'lineHeight',
-            figmaValue: `${figmaLineHeight}px`,
-            liveValue: `${liveLineHeight}px`,
-            status,
+            nodeId: node.id, nodeName: node.name, property: 'lineHeight',
+            figmaValue: `${figmaLineHeight}px`, liveValue: `${liveLineHeight}px`, status,
           });
         }
       }
     }
+
   } finally {
     if (browser) await browser.close();
   }

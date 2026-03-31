@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import { useAccessibility, AccessibilityIssue } from '../hooks/useAccessibility';
+import { useAISummary } from '../hooks/useAISummary';
 
 type FilterType = 'all' | 'fail' | 'warn' | 'pass';
 
 const AccessibilityPanel: React.FC = () => {
   const { result, status, error, runCheck } = useAccessibility();
+  const { summary, status: aiStatus, generateSummary } = useAISummary();
   const [url, setUrl] = useState('');
   const [filter, setFilter] = useState<FilterType>('all');
 
@@ -129,7 +131,8 @@ const AccessibilityPanel: React.FC = () => {
           <p style={{ color: '#94a3b8', fontSize: '0.875rem', margin: 0 }}>
             Scanning page for accessibility issues...
           </p>
-          <style>{`@keyframes a11y-spin { to { transform: rotate(360deg); } }`}</style>
+          <style>{`@keyframes a11y-spin { to { transform: rotate(360deg); } }
+@keyframes ai-pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }`}</style>
         </div>
       )}
 
@@ -196,6 +199,91 @@ const AccessibilityPanel: React.FC = () => {
                 </div>
               </div>
             ))}
+          </div>
+
+          {/* AI SUMMARY SECTION */}
+          <div style={{ marginBottom: '20px' }}>
+            <button
+              id="ai-summary-btn"
+              onClick={() => result && generateSummary(result)}
+              disabled={aiStatus === 'loading'}
+              style={{
+                background: aiStatus === 'loading' ? '#475569' : '#3b82f6',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '8px',
+                padding: '10px 20px',
+                fontSize: '1.125rem',
+                fontWeight: 600,
+                cursor: aiStatus === 'loading' ? 'not-allowed' : 'pointer',
+                opacity: aiStatus === 'loading' ? 0.7 : 1,
+                transition: 'all 0.2s',
+                marginBottom: '12px',
+              }}
+            >
+              {aiStatus === 'loading' ? 'Generating...' : '✨ Generate AI Summary'}
+            </button>
+
+            {aiStatus === 'loading' && (
+              <div
+                style={{
+                  background: '#1e293b',
+                  border: '1px solid #334155',
+                  borderRadius: '8px',
+                  padding: '16px',
+                  height: '80px',
+                  animation: 'ai-pulse 1.5s ease-in-out infinite',
+                }}
+              />
+            )}
+
+            {aiStatus === 'done' && summary && (
+              <div
+                id="ai-summary-box"
+                style={{
+                  background: '#0f172a',
+                  border: '1px solid #3b82f6',
+                  borderLeft: '4px solid #3b82f6',
+                  borderRadius: '8px',
+                  padding: '16px',
+                }}
+              >
+                <div
+                  style={{
+                    color: '#3b82f6',
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                    marginBottom: '8px',
+                  }}
+                >
+                  ✨ AI Summary
+                </div>
+                <div
+                  style={{
+                    color: '#e2e8f0',
+                    fontSize: '0.875rem',
+                    lineHeight: 1.6,
+                  }}
+                >
+                  {summary}
+                </div>
+              </div>
+            )}
+
+            {aiStatus === 'error' && (
+              <div
+                style={{
+                  background: 'rgba(248, 113, 113, 0.1)',
+                  border: '1px solid #f87171',
+                  borderRadius: '8px',
+                  padding: '16px',
+                  color: '#f87171',
+                  fontSize: '0.875rem',
+                }}
+              >
+                <strong>AI Error:</strong> Failed to generate summary. Check your API key.
+              </div>
+            )}
           </div>
 
           {/* FILTER BAR */}

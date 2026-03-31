@@ -5,22 +5,45 @@
     <script>
         window.addEventListener('message', async (event) => {
             const msg = event.data.pluginMessage;
-            if (!msg || msg.type !== 'send-data') return;
+            if (!msg) return;
 
-            try {
-                const response = await fetch('http://localhost:3333/figma-data', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(msg.payload)
-                });
+            // ── Existing: Send Node Data ────────────────────────────────────
+            if (msg.type === 'send-data') {
+                try {
+                    const response = await fetch('http://localhost:3333/figma-data', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(msg.payload)
+                    });
 
-                if (response.ok) {
-                    parent.postMessage({ pluginMessage: { type: 'success' } }, '*');
-                } else {
-                    parent.postMessage({ pluginMessage: { type: 'error' } }, '*');
+                    if (response.ok) {
+                        parent.postMessage({ pluginMessage: { type: 'success' } }, '*');
+                    } else {
+                        parent.postMessage({ pluginMessage: { type: 'error' } }, '*');
+                    }
+                } catch (e) {
+                    parent.postMessage({ pluginMessage: { type: 'error', message: e.message } }, '*');
                 }
-            } catch (e) {
-                parent.postMessage({ pluginMessage: { type: 'error', message: e.message } }, '*');
+            }
+
+            // ── New: Export Frame (Screenshot Diff) ─────────────────────────
+            if (msg.type === 'export-frame') {
+                try {
+                    const { frameBase64, frameName, width, height } = msg.payload;
+                    const response = await fetch('http://localhost:3333/figma-frame', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ frameBase64, frameName, width, height })
+                    });
+
+                    if (response.ok) {
+                        parent.postMessage({ pluginMessage: { type: 'export-success' } }, '*');
+                    } else {
+                        parent.postMessage({ pluginMessage: { type: 'export-error' } }, '*');
+                    }
+                } catch (e) {
+                    parent.postMessage({ pluginMessage: { type: 'export-error', message: e.message } }, '*');
+                }
             }
         });
     </script>

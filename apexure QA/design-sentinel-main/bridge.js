@@ -3,6 +3,10 @@ const http = require('http');
 let latestFigmaData = null;
 let waitResolvers = [];
 
+// ── New: frame data for Screenshot Diff ─────────────────────────────────────
+let latestFrameData = null;
+let frameWaitResolvers = [];
+
 function waitForFigmaData() {
   if (latestFigmaData) {
     return Promise.resolve(latestFigmaData);
@@ -14,6 +18,18 @@ function waitForFigmaData() {
 
 function getLatestFigmaData() {
   return latestFigmaData;
+}
+
+// ── New: wait for a frame export from Screenshot Diff command ─────────────────
+function waitForFigmaFrame() {
+  if (latestFrameData) {
+    const data = latestFrameData;
+    latestFrameData = null;
+    return Promise.resolve(data);
+  }
+  return new Promise((resolve) => {
+    frameWaitResolvers.push(resolve);
+  });
 }
 
 function setCorsHeaders(res) {
@@ -66,6 +82,45 @@ const bridgeServer = http.createServer((req, res) => {
     return;
   }
 
+  // ── New: POST /figma-frame — receives base64 PNG from plugin ───────────────
+  if (req.method === 'POST' && req.url === '/figma-frame') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        const payload = JSON.parse(body);
+        latestFrameData = payload;
+        console.log(`[Bridge] Received frame export: ${payload.frameName || 'unnamed'} (${payload.width}x${payload.height})`);
+
+        // Resolve any pending waitForFigmaFrame promises
+        for (const resolve of frameWaitResolvers) {
+          resolve(latestFrameData);
+        }
+        frameWaitResolvers = [];
+        latestFrameData = null; // clear after resolving waiters
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) {
+        console.error('[Bridge] Error parsing frame payload:', err.message);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+      }
+    });
+    return;
+  }
+
+  // ── New: GET /figma-frame — returns and clears latest frame data ───────────
+  if (req.method === 'GET' && req.url === '/figma-frame') {
+    const data = latestFrameData;
+    latestFrameData = null;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+    return;
+  }
+
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
@@ -86,4 +141,4 @@ function startBridge(port = 3333) {
   });
 }
 
-module.exports = { startBridge, waitForFigmaData, getLatestFigmaData };
+module.exports = { startBridge, waitForFigmaData, getLatestFigmaData, waitForFigmaFrame };

@@ -987,45 +987,56 @@ export async function registerRoutes(app: Express): Promise<void> {
   // --- SCREENSHOT DIFF ---
   app.post("/api/screenshot-diff", async (req, res) => {
     try {
-      const { figmaUrl, figmaToken, liveUrl } = req.body;
-      if (!figmaUrl || !figmaToken || !liveUrl) return res.status(400).json({ message: "figmaUrl, figmaToken, and liveUrl are all required." });
-      if (typeof figmaToken !== 'string' || figmaToken.trim().length === 0) return res.status(400).json({ message: "Invalid Figma token." });
-
-      const figmaParsed = parseFigmaUrl(figmaUrl);
+      const { liveUrl, figmaFrameBase64 } = req.body;
       const webUrl = normalizeUrl(liveUrl);
-      if (!figmaParsed) throw new Error("Invalid Figma URL. Make sure it includes a node-id parameter.");
-      if (!webUrl) throw new Error("Invalid live URL.");
+      if (!webUrl) return res.status(400).json({ message: "Please provide a valid live URL." });
 
-      // Step 1: Get Figma image export URL
-      const figmaImgRes = await fetchWithRetry(
-        `https://api.figma.com/v1/images/${figmaParsed.fileKey}?ids=${figmaParsed.nodeId}&format=png&scale=1`,
-        { headers: { 'X-Figma-Token': figmaToken } }
-      );
-      const figmaImgData = await figmaImgRes.json();
-      if (figmaImgData.err) throw new Error(`Figma image export error: ${figmaImgData.err}`);
-      const figmaImageUrl = figmaImgData.images?.[figmaParsed.nodeId] || figmaImgData.images?.[figmaParsed.nodeIdRaw];
-      if (!figmaImageUrl) throw new Error('Figma image export returned no image URL for this node.');
+      // Step 1: Get Figma frame image — from request body or bridge server
+      let figmaImageBuffer: Buffer;
+      let frameName: string | null = null;
 
-      // Step 2: Download the actual PNG bytes from the pre-signed S3 URL
-      const figmaDownloadRes = await fetch(figmaImageUrl);
-      if (!figmaDownloadRes.ok) throw new Error('Failed to download Figma image from export URL.');
-      const figmaImageBuffer = Buffer.from(await figmaDownloadRes.arrayBuffer());
+      if (figmaFrameBase64) {
+        // Strip data URI prefix if present
+        const raw = figmaFrameBase64.replace(/^data:image\/\w+;base64,/, '');
+        figmaImageBuffer = Buffer.from(raw, 'base64');
+      } else {
+        // Try fetching from bridge server
+        try {
+          const bridgeRes = await fetch('http://localhost:3333/figma-frame');
+          if (bridgeRes.ok) {
+            const bridgeData = await bridgeRes.json();
+            if (bridgeData && bridgeData.frameBase64) {
+              figmaImageBuffer = Buffer.from(bridgeData.frameBase64, 'base64');
+              frameName = bridgeData.frameName || null;
+            } else {
+              return res.status(400).json({ message: "Please export a frame from Figma plugin or upload an image" });
+            }
+          } else {
+            return res.status(400).json({ message: "Please export a frame from Figma plugin or upload an image" });
+          }
+        } catch {
+          return res.status(400).json({ message: "Please export a frame from Figma plugin or upload an image" });
+        }
+      }
 
-      // Step 3: Screenshot the live page with Playwright
+      // Step 2: Screenshot the live page with Playwright
       const VIEWPORT = { width: 1440, height: 900 };
       let liveScreenshotBuffer: Buffer;
       const browser = await chromium.launch({ headless: true });
       try {
-        const context = await browser.newContext({ viewport: VIEWPORT });
+        const context = await browser.newContext({
+          viewport: VIEWPORT,
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120',
+        });
         const page = await context.newPage();
-        await page.goto(webUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForTimeout(1500);
+        await page.goto(webUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
         liveScreenshotBuffer = Buffer.from(await page.screenshot({ fullPage: true, type: 'png' }));
       } finally {
         await browser.close();
       }
 
-      // Step 4: Resize both images to the same dimensions using sharp
+      // Step 3: Resize both images to the same dimensions using sharp
       const liveMeta = await sharp(liveScreenshotBuffer).metadata();
       const targetWidth = liveMeta.width!;
       const targetHeight = liveMeta.height!;
@@ -1040,7 +1051,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         .png()
         .toBuffer();
 
-      // Step 5: Decode PNGs and run pixelmatch
+      // Step 4: Decode PNGs and run pixelmatch
       const figmaPng = PNG.sync.read(figmaResized);
       const livePng = PNG.sync.read(liveResized);
       const diffPng = new PNG({ width: targetWidth, height: targetHeight });
@@ -1059,6 +1070,62 @@ export async function registerRoutes(app: Express): Promise<void> {
 
       const diffBuffer = PNG.sync.write(diffPng);
 
+      // Step 5: AI explanation via OpenRouter if mismatch > 2%
+      let aiExplanation: string | null = null;
+      if (mismatchPercentage > 2) {
+        const openrouterKey = process.env.OPENROUTER_API_KEY;
+        if (openrouterKey) {
+          try {
+            const https = await import('https');
+            const aiResult: string = await new Promise((resolve, reject) => {
+              const postData = JSON.stringify({
+                model: 'openrouter/auto',
+                max_tokens: 200,
+                messages: [
+                  {
+                    role: 'system',
+                    content: 'You are a QA engineer. Describe visual differences between a Figma design and live webpage based on pixel diff percentage. Be specific and concise. Max 3 sentences.',
+                  },
+                  {
+                    role: 'user',
+                    content: `Pixel diff shows ${mismatchPercentage}% mismatch between Figma design and live page. Describe what visual differences are likely present.`,
+                  },
+                ],
+              });
+              const options = {
+                hostname: 'openrouter.ai',
+                port: 443,
+                path: '/api/v1/chat/completions',
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${openrouterKey}`,
+                  'Content-Type': 'application/json',
+                  'HTTP-Referer': 'http://localhost:5000',
+                  'X-Title': 'Apexure QA',
+                  'Content-Length': Buffer.byteLength(postData),
+                },
+              };
+              const aiReq = https.request(options, (aiRes: any) => {
+                let data = '';
+                aiRes.on('data', (chunk: any) => { data += chunk; });
+                aiRes.on('end', () => {
+                  try {
+                    const parsed = JSON.parse(data);
+                    resolve(parsed.choices?.[0]?.message?.content || '');
+                  } catch { resolve(''); }
+                });
+              });
+              aiReq.on('error', () => resolve(''));
+              aiReq.write(postData);
+              aiReq.end();
+            });
+            if (aiResult) aiExplanation = aiResult;
+          } catch {
+            aiExplanation = null;
+          }
+        }
+      }
+
       res.json({
         figmaImage: `data:image/png;base64,${figmaResized.toString('base64')}`,
         liveImage: `data:image/png;base64,${liveResized.toString('base64')}`,
@@ -1067,6 +1134,8 @@ export async function registerRoutes(app: Express): Promise<void> {
         mismatchPixels,
         totalPixels,
         viewport: `${targetWidth}x${targetHeight}`,
+        aiExplanation,
+        frameName: frameName || null,
       });
     } catch (error: any) {
       console.error('Screenshot diff error:', error);
