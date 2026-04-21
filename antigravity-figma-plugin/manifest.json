@@ -1,0 +1,30 @@
+{
+  "name": "Antigravity QA Bridge",
+  "id": "antigravity-qa-bridge",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": [
+    "figma"
+  ],
+  "documentAccess": "dynamic-page",
+  "menu": [
+    {
+      "name": "Send Node Data (Design Sentinel)",
+      "command": "nodes"
+    },
+    {
+      "name": "Export Frame (Screenshot Diff)",
+      "command": "export"
+    }
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "http://localhost:3333"
+    ],
+    "reasoning": "Sends Figma node data to a local QA bridge server for design comparison",
+    "devAllowedDomains": [
+      "http://localhost:3333"
+    ]
+  }
+}

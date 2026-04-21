@@ -1,0 +1,18 @@
+{
+  "heading": {
+    "color": {
+      "figmaValue": "rgba(26, 26, 26, 1)",
+      "websiteValue": "rgba(25, 25, 25, 1)"
+    }
+  },
+  "paragraph": {
+    "fontSize": {
+      "figmaValue": 16,
+      "websiteValue": 15
+    },
+    "color": {
+      "figmaValue": "rgba(77, 77, 77, 1)",
+      "websiteValue": "rgba(76, 76, 76, 1)"
+    }
+  }
+}

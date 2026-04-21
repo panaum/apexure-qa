@@ -1,0 +1,13 @@
+{
+    "thresholds": {
+        "fontSize": 0,
+        "fontWeight": 0,
+        "lineHeight": 1,
+        "colorRGB": 2
+    },
+    "roundingStrategy": "round-to-nearest-pixel",
+    "ignoreProperties": [
+        "margin",
+        "padding"
+    ]
+}

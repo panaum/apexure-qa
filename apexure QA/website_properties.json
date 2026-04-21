@@ -1,0 +1,24 @@
+{
+  "heading": {
+    "font-family": "Inter, sans-serif",
+    "font-weight": "700",
+    "font-size": "32px",
+    "line-height": "1.2",
+    "letter-spacing": "-0.5px",
+    "text-align": "center",
+    "text-transform": "uppercase",
+    "text-decoration": "none",
+    "color": "rgba(25, 25, 25, 1)"
+  },
+  "paragraph": {
+    "font-family": "Inter, sans-serif",
+    "font-weight": "400",
+    "font-size": "15px",
+    "line-height": "normal",
+    "letter-spacing": "normal",
+    "text-align": "left",
+    "text-transform": "none",
+    "text-decoration": "none",
+    "color": "rgba(76, 76, 76, 1)"
+  }
+}
