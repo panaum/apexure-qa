@@ -22,3 +22,12 @@ aptPkgs = [
   "libxext6",
   "libxcb1"
 ]
+
+[phases.install]
+cmds = ["npm install --omit=dev=false"]
+
+[phases.build]
+cmds = ["npm run build", "npx playwright install chromium"]
+
+[start]
+cmd = "npm run start"

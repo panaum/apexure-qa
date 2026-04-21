@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx --env-file=.env index.ts",
     "build": "vite build",
-    "postinstall": "npx playwright install chromium",
     "start": "cross-env NODE_ENV=production tsx index.ts",
     "check": "tsc",
     "db:push": "drizzle-kit push"
