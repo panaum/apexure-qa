@@ -24,10 +24,13 @@ aptPkgs = [
 ]
 
 [phases.install]
-cmds = ["npm install --omit=dev=false"]
+# --include=dev forces devDeps to install even when NODE_ENV=production is set by Railway
+cmds = ["npm install --include=dev"]
 
 [phases.build]
+# Build the Vite frontend (requires vite from devDeps above)
 cmds = ["npm run build", "npx playwright install chromium"]
 
 [start]
 cmd = "npm run start"
+
