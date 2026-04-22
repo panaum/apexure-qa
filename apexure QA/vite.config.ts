@@ -1,22 +1,31 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+// runtimeErrorOverlay is a Replit dev tool — only import in non-production
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
+
+const isProduction = process.env.NODE_ENV === "production";
 
 export default defineConfig({
   plugins: [
     react(),
-    runtimeErrorOverlay(),
-    ...(process.env.NODE_ENV !== "production" &&
-      process.env.REPL_ID !== undefined
+    // Exclude ALL Replit plugins from production builds.
+    // In production these inject /@exc-... virtual module references that only
+    // exist in Vite's dev server, causing ChunkLoadError on the deployed site.
+    ...(!isProduction
       ? [
-        await import("@replit/vite-plugin-cartographer").then((m) =>
-          m.cartographer(),
-        ),
-        await import("@replit/vite-plugin-dev-banner").then((m) =>
-          m.devBanner(),
-        ),
-      ]
+          runtimeErrorOverlay(),
+          ...(process.env.REPL_ID !== undefined
+            ? [
+                await import("@replit/vite-plugin-cartographer").then((m) =>
+                  m.cartographer(),
+                ),
+                await import("@replit/vite-plugin-dev-banner").then((m) =>
+                  m.devBanner(),
+                ),
+              ]
+            : []),
+        ]
       : []),
   ],
   resolve: {
