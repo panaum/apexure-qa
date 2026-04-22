@@ -70,7 +70,6 @@ app.use((req, res, next) => {
       log(logLine);
     }
   });
-
   next();
 });
 
@@ -80,7 +79,8 @@ app.use((req, res, next) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  await registerRoutes(app);;
+  await registerRoutes(app).catch(err => { console.error('[STARTUP] registerRoutes failed:', err); process.exit(1); });
+
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
