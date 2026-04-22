@@ -1,6 +1,5 @@
 import { db } from "./db";
-// Change the line below from "@shared/schema" to "./db"
-import { comparisons, figmaFrames, webPages, type CreateComparisonInput, type Comparison, type InsertFigmaFrame, type FigmaFrame, type InsertWebPage, type WebPage } from "@shared/schema";
+import { comparisons, figmaFrames, webPages, type CreateComparisonInput, type Comparison, type InsertFigmaFrame, type FigmaFrame, type InsertWebPage, type WebPage } from "./shared/schema";
 import { desc, eq } from "drizzle-orm";
 
 // Helper: throws a clear error if DATABASE_URL is not configured
