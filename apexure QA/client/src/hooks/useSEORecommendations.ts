@@ -13,7 +13,7 @@ export function useSEORecommendations() {
     setRecommendations(null);
 
     try {
-      const response = await fetch('http://localhost:3334/seo-ai-recommendations', {
+      const response = await fetch('/api/seo-ai-recommendations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(seoResult),

@@ -33,7 +33,7 @@ export function useComparison() {
     setError(null);
 
     try {
-      const res = await fetch('http://localhost:3334/compare', {
+      const res = await fetch('/api/compare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: liveUrl }),

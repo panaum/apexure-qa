@@ -9,9 +9,7 @@ const isProduction = process.env.NODE_ENV === "production";
 export default defineConfig({
   plugins: [
     react(),
-    // Exclude ALL Replit plugins from production builds.
-    // In production these inject /@exc-... virtual module references that only
-    // exist in Vite's dev server, causing ChunkLoadError on the deployed site.
+    // Strictly exclude ALL Replit/dev plugins from production builds.
     ...(!isProduction
       ? [
           runtimeErrorOverlay(),

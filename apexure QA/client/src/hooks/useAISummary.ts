@@ -14,7 +14,7 @@ export function useAISummary() {
     setSummary(null);
 
     try {
-      const response = await fetch('http://localhost:3334/ai-summary', {
+      const response = await fetch('/api/ai-summary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(accessibilityResult),
