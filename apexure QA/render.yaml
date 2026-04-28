@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: apexure-qa
+    env: docker
+    region: singapore
+    plan: free
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false   # Set this manually in Render dashboard
+      - key: WHATFONTIS_API_KEY
+        sync: false
+      - key: GOOGLE_PSI_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: TEXTGEARS_API_KEY
+        sync: false
