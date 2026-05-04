@@ -3,16 +3,31 @@
 
 <body>
     <script>
-        const API_URL = "https://apexure-qa-guit.onrender.com";
+        const LIVE_URL = "https://apexure-qa-guit.onrender.com";
+        const LOCAL_URL = "http://localhost:3333";
+
+        async function smartFetch(path, options) {
+            try {
+                // 1. Try local first (fastest for development)
+                console.log(`[Plugin] Trying local bridge: ${LOCAL_URL}${path}`);
+                const localRes = await fetch(`${LOCAL_URL}${path}`, { ...options, signal: AbortSignal.timeout(1000) });
+                if (localRes.ok) return localRes;
+            } catch (e) {
+                console.log("[Plugin] Local bridge not found, falling back to Live Render...");
+            }
+
+            // 2. Fall back to Live Render
+            console.log(`[Plugin] Sending to Live Render: ${LIVE_URL}/api${path}`);
+            return fetch(`${LIVE_URL}/api${path}`, options);
+        }
 
         window.addEventListener('message', async (event) => {
             const msg = event.data.pluginMessage;
             if (!msg) return;
 
-            // ── Existing: Send Node Data ────────────────────────────────────
             if (msg.type === 'send-data') {
                 try {
-                    const response = await fetch(`${API_URL}/api/figma-data`, {
+                    const response = await smartFetch('/figma-data', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(msg.payload)
@@ -21,19 +36,18 @@
                     if (response.ok) {
                         parent.postMessage({ pluginMessage: { type: 'success' } }, '*');
                     } else {
-                        parent.postMessage({ pluginMessage: { type: 'error' } }, '*');
+                        throw new Error(`Server responded with ${response.status}`);
                     }
                 } catch (e) {
-                    console.error('[Plugin Error] figma-data fetch failed:', e);
+                    console.error('[Plugin Error] figma-data failed:', e);
                     parent.postMessage({ pluginMessage: { type: 'error', message: e.message } }, '*');
                 }
             }
 
-            // ── New: Export Frame (Screenshot Diff) ─────────────────────────
             if (msg.type === 'export-frame') {
                 try {
                     const { frameBase64, frameName, width, height, nodes } = msg.payload;
-                    const response = await fetch(`${API_URL}/api/figma-frame`, {
+                    const response = await smartFetch('/figma-frame', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ frameBase64, frameName, width, height, nodes })
@@ -42,10 +56,10 @@
                     if (response.ok) {
                         parent.postMessage({ pluginMessage: { type: 'export-success' } }, '*');
                     } else {
-                        parent.postMessage({ pluginMessage: { type: 'export-error' } }, '*');
+                        throw new Error(`Server responded with ${response.status}`);
                     }
                 } catch (e) {
-                    console.error('[Plugin Error] figma-frame fetch failed:', e);
+                    console.error('[Plugin Error] figma-frame failed:', e);
                     parent.postMessage({ pluginMessage: { type: 'export-error', message: e.message } }, '*');
                 }
             }
