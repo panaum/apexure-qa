@@ -20,11 +20,13 @@
   ],
   "networkAccess": {
     "allowedDomains": [
-      "http://localhost:3333"
+      "http://localhost:3333",
+      "https://apexure-qa-guit.onrender.com"
     ],
-    "reasoning": "Sends Figma node data to a local QA bridge server for design comparison",
+    "reasoning": "Sends Figma node data to the QA bridge server for design comparison",
     "devAllowedDomains": [
-      "http://localhost:3333"
+      "http://localhost:3333",
+      "https://apexure-qa-guit.onrender.com"
     ]
   }
 }
