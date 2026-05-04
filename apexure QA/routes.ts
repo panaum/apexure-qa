@@ -692,7 +692,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           const elementData = await page.evaluate((searchText) => {
             const semanticTags = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'SPAN', 'A', 'BUTTON', 'LI', 'LABEL'];
             
-            function findDeepestTextElement(el: any, targetText: string) {
+            const findDeepestTextElement = (el: any, targetText: string) => {
               if (semanticTags.includes(el.tagName)) return el;
               for (const tag of semanticTags) {
                 const children = el.querySelectorAll(tag.toLowerCase());
@@ -701,7 +701,7 @@ export async function registerRoutes(app: Express): Promise<void> {
                 }
               }
               return el;
-            }
+            };
 
             const allElements = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, span, div, li, a, button, label');
             let bestElement = null;
