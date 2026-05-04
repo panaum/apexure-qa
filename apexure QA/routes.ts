@@ -6,7 +6,7 @@ import { PNG } from "pngjs";
 import sharp from "sharp";
 
 // --- COMPARISON HELPERS ---
-function rgbToHex(r: number, g: number, b: number) {
+function rgbNumbersToHex(r: number, g: number, b: number) {
   const toHex = (v: number) => Math.round(v).toString(16).padStart(2, '0');
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
@@ -719,6 +719,25 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Process mismatches
       for (const { node, content, elementData, skipped } of evaluationResults as any) {
         if (skipped) continue;
+        // Compare color
+        if (node.fills && node.fills.length > 0 && node.fills[0].color) {
+          const figmaColor = node.fills[0].color;
+          const figmaHex = rgbNumbersToHex(figmaColor.r, figmaColor.g, figmaColor.b);
+          const liveColor = parseCssColor(elementData.color);
+          if (liveColor) {
+            const liveHex = rgbNumbersToHex(liveColor.r, liveColor.g, liveColor.b);
+            const dr = Math.abs(figmaColor.r - liveColor.r);
+            const dg = Math.abs(figmaColor.g - liveColor.g);
+            const db = Math.abs(figmaColor.b - liveColor.b);
+            let status = 'pass';
+            if (dr > 2 || dg > 2 || db > 2) status = 'fail';
+            else if (dr > 0 || dg > 0 || db > 0) status = 'warn';
+            mismatches.push({
+              nodeId: node.id, nodeName: node.name, property: 'color',
+              figmaValue: figmaHex, liveValue: liveHex, status,
+            });
+          }
+        }
         if (!elementData) {
           mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'element', figmaValue: content, liveValue: 'NOT FOUND', status: 'fail' });
           continue;
