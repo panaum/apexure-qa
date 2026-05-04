@@ -753,6 +753,36 @@ async function generateTypographyHeatmap(page: any, figmaNodes: any[], screensho
 }
 
 export async function registerRoutes(app: Express): Promise<void> {
+  // --- FIGMA BRIDGE STATE ---
+  let latestFigmaData: any = null;
+  let latestFrameData: any = null;
+
+  // Receives node data from the Figma plugin
+  app.post("/api/figma-data", (req, res) => {
+    latestFigmaData = req.body;
+    console.log(`[Bridge] Received ${latestFigmaData.nodes?.length || 0} nodes from plugin`);
+    res.json({ ok: true });
+  });
+
+  // Returns latest node data to the frontend
+  app.get("/api/figma-data", (req, res) => {
+    res.json(latestFigmaData || { nodes: [] });
+  });
+
+  // Receives base64 frame image from the Figma plugin
+  app.post("/api/figma-frame", (req, res) => {
+    latestFrameData = req.body;
+    console.log(`[Bridge] Received frame export: ${latestFrameData.frameName}`);
+    res.json({ ok: true });
+  });
+
+  // Returns latest frame image to the frontend (and clears it)
+  app.get("/api/figma-frame", (req, res) => {
+    const data = latestFrameData;
+    latestFrameData = null; // Clear after read
+    res.json(data || null);
+  });
+
 
   app.post("/api/compare", async (req, res) => {
     try {
