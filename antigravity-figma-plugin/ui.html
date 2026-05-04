@@ -3,6 +3,8 @@
 
 <body>
     <script>
+        const API_URL = "https://apexure-qa-guit.onrender.com";
+
         window.addEventListener('message', async (event) => {
             const msg = event.data.pluginMessage;
             if (!msg) return;
@@ -10,7 +12,7 @@
             // ── Existing: Send Node Data ────────────────────────────────────
             if (msg.type === 'send-data') {
                 try {
-                    const response = await fetch('http://localhost:3333/figma-data', {
+                    const response = await fetch(`${API_URL}/api/figma-data`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(msg.payload)
@@ -30,7 +32,7 @@
             if (msg.type === 'export-frame') {
                 try {
                     const { frameBase64, frameName, width, height, nodes } = msg.payload;
-                    const response = await fetch('http://localhost:3333/figma-frame', {
+                    const response = await fetch(`${API_URL}/api/figma-frame`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ frameBase64, frameName, width, height, nodes })
