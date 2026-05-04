@@ -5,14 +5,29 @@
     <script>
         const LIVE_URL = "https://apexure-qa-guit.onrender.com";
 
+        async function reportLog(level, message, context = {}) {
+            try {
+                await fetch(`${LIVE_URL}/api/logs`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ level, message, context: { ...context, source: 'figma-plugin' } })
+                });
+            } catch (e) {
+                console.warn("[Plugin] Failed to send log to server:", e);
+            }
+        }
+
         // Wake up Render as soon as the plugin opens
         async function wakeUpServer() {
             console.log("[Plugin] Waking up Render server...");
+            reportLog('INFO', 'Plugin opened, waking up server');
             try {
                 await fetch(`${LIVE_URL}/api/figma-data`, { method: 'GET' });
                 console.log("[Plugin] Server is awake!");
+                reportLog('INFO', 'Server is awake');
             } catch (e) {
                 console.warn("[Plugin] Wake up ping failed, but we will try anyway.");
+                reportLog('WARN', 'Server wake up ping failed', { error: e.message });
             }
         }
         wakeUpServer();
@@ -52,11 +67,13 @@
 
                     if (response.ok) {
                         parent.postMessage({ pluginMessage: { type: 'success' } }, '*');
+                        reportLog('INFO', 'Figma data sent successfully');
                     } else {
                         throw new Error(`Server responded with ${response.status}`);
                     }
                 } catch (e) {
                     console.error('[Plugin Error] figma-data failed:', e);
+                    reportLog('ERROR', 'Figma data send failed', { error: e.message });
                     parent.postMessage({ pluginMessage: { type: 'error', message: e.message } }, '*');
                 }
             }
@@ -72,11 +89,13 @@
 
                     if (response.ok) {
                         parent.postMessage({ pluginMessage: { type: 'export-success' } }, '*');
+                        reportLog('INFO', 'Figma frame exported successfully');
                     } else {
                         throw new Error(`Server responded with ${response.status}`);
                     }
                 } catch (e) {
                     console.error('[Plugin Error] figma-frame failed:', e);
+                    reportLog('ERROR', 'Figma frame export failed', { error: e.message });
                     parent.postMessage({ pluginMessage: { type: 'export-error', message: e.message } }, '*');
                 }
             }
