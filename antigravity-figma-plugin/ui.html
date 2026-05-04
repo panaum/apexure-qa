@@ -18,12 +18,24 @@
         wakeUpServer();
 
         async function liveFetch(path, options) {
-            console.log(`[Plugin] Connecting to Live Render: ${LIVE_URL}/api${path}`);
-            return fetch(`${LIVE_URL}/api${path}`, {
-                ...options,
-                // Give it up to 10 seconds to respond in case it's waking up
-                signal: AbortSignal.timeout(10000) 
-            });
+            const url = `${LIVE_URL}/api${path}`;
+            console.log(`[Plugin] Connecting to: ${url}`);
+            
+            // Figma-compatible timeout logic
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 seconds
+
+            try {
+                const response = await fetch(url, {
+                    ...options,
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                return response;
+            } catch (e) {
+                clearTimeout(timeoutId);
+                throw e;
+            }
         }
 
         window.addEventListener('message', async (event) => {
