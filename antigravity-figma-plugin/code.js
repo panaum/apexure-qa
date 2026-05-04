@@ -82,7 +82,7 @@ if (figma.command === 'export') {
           if (msg.type === 'export-success') {
             figma.notify('✅ Frame exported to Screenshot Diff!');
           } else if (msg.type === 'export-error') {
-            figma.notify('❌ Bridge not running — start node server.js first');
+            figma.notify('❌ Live bridge not responding — check Render deployment');
           }
           figma.closePlugin();
         };
@@ -115,7 +115,7 @@ if (figma.command === 'export') {
       if (msg.type === 'success') {
         figma.notify('✅ Sent ' + allNodes.length + ' nodes to Design Sentinel!');
       } else {
-        figma.notify('❌ Bridge not running — start node server.js first');
+        figma.notify('❌ Live bridge not responding — check Render deployment');
       }
       figma.closePlugin();
     };
