@@ -610,6 +610,28 @@ export async function registerRoutes(app: Express): Promise<void> {
   // --- FIGMA BRIDGE STATE ---
   let latestFigmaData: any = null;
   let latestFrameData: any = null;
+  const clientLogs: any[] = [];
+
+  // Receive logs from clients (Figma plugin, Frontend)
+  app.post("/api/logs", (req, res) => {
+    const { level, message, context } = req.body;
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      level: level || 'INFO',
+      message: message || 'No message',
+      context: context || {}
+    };
+    clientLogs.push(logEntry);
+    if (clientLogs.length > 100) clientLogs.shift(); // Keep last 100
+
+    console.log(`[CLIENT-LOG][${logEntry.level}] ${logEntry.message}`, JSON.stringify(logEntry.context));
+    res.json({ ok: true });
+  });
+
+  // Get recent logs (for debugging)
+  app.get("/api/logs", (req, res) => {
+    res.json(clientLogs);
+  });
 
   // Bridge routes
   app.post("/api/figma-data", (req, res) => {
