@@ -742,8 +742,14 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Process mismatches
       for (const { node, content, elementData, skipped } of evaluationResults as any) {
         if (skipped) continue;
+
+        if (!elementData) {
+          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'element', figmaValue: content, liveValue: 'NOT FOUND', status: 'fail' });
+          continue;
+        }
+
         // Compare color
-        if (node.fills && node.fills.length > 0 && node.fills[0].color) {
+        if (node.fills && node.fills.length > 0 && node.fills[0] && node.fills[0].color) {
           const figmaColor = node.fills[0].color;
           const figmaHex = rgbNumbersToHex(figmaColor.r, figmaColor.g, figmaColor.b);
           const liveColor = parseCssColor(elementData.color);
@@ -761,17 +767,13 @@ export async function registerRoutes(app: Express): Promise<void> {
             });
           }
         }
-        if (!elementData) {
-          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'element', figmaValue: content, liveValue: 'NOT FOUND', status: 'fail' });
-          continue;
-        }
 
         if (node.fontSize) {
           const liveSize = parsePx(elementData.fontSize);
           mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'fontSize', figmaValue: `${node.fontSize}px`, liveValue: `${liveSize}px`, status: liveSize !== node.fontSize ? 'fail' : 'pass' });
         }
         if (node.fontFamily) {
-          const liveFamily = elementData.fontFamily.split(',')[0].trim().replace(/['"]/g, '');
+          const liveFamily = elementData.fontFamily ? elementData.fontFamily.split(',')[0].trim().replace(/['"]/g, '') : 'Unknown';
           mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'fontFamily', figmaValue: node.fontFamily, liveValue: liveFamily, status: liveFamily.toLowerCase() === node.fontFamily.toLowerCase() ? 'pass' : 'fail' });
         }
         if (node.fontWeight) {
