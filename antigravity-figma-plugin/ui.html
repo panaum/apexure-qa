@@ -4,21 +4,26 @@
 <body>
     <script>
         const LIVE_URL = "https://apexure-qa-guit.onrender.com";
-        const LOCAL_URL = "http://localhost:3333";
 
-        async function smartFetch(path, options) {
+        // Wake up Render as soon as the plugin opens
+        async function wakeUpServer() {
+            console.log("[Plugin] Waking up Render server...");
             try {
-                // 1. Try local first (fastest for development)
-                console.log(`[Plugin] Trying local bridge: ${LOCAL_URL}${path}`);
-                const localRes = await fetch(`${LOCAL_URL}${path}`, { ...options, signal: AbortSignal.timeout(1000) });
-                if (localRes.ok) return localRes;
+                await fetch(`${LIVE_URL}/api/figma-data`, { method: 'GET' });
+                console.log("[Plugin] Server is awake!");
             } catch (e) {
-                console.log("[Plugin] Local bridge not found, falling back to Live Render...");
+                console.warn("[Plugin] Wake up ping failed, but we will try anyway.");
             }
+        }
+        wakeUpServer();
 
-            // 2. Fall back to Live Render
-            console.log(`[Plugin] Sending to Live Render: ${LIVE_URL}/api${path}`);
-            return fetch(`${LIVE_URL}/api${path}`, options);
+        async function liveFetch(path, options) {
+            console.log(`[Plugin] Connecting to Live Render: ${LIVE_URL}/api${path}`);
+            return fetch(`${LIVE_URL}/api${path}`, {
+                ...options,
+                // Give it up to 10 seconds to respond in case it's waking up
+                signal: AbortSignal.timeout(10000) 
+            });
         }
 
         window.addEventListener('message', async (event) => {
@@ -27,7 +32,7 @@
 
             if (msg.type === 'send-data') {
                 try {
-                    const response = await smartFetch('/figma-data', {
+                    const response = await liveFetch('/figma-data', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(msg.payload)
@@ -47,7 +52,7 @@
             if (msg.type === 'export-frame') {
                 try {
                     const { frameBase64, frameName, width, height, nodes } = msg.payload;
-                    const response = await smartFetch('/figma-frame', {
+                    const response = await liveFetch('/figma-frame', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ frameBase64, frameName, width, height, nodes })
