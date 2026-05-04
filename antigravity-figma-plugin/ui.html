@@ -24,6 +24,7 @@
                         parent.postMessage({ pluginMessage: { type: 'error' } }, '*');
                     }
                 } catch (e) {
+                    console.error('[Plugin Error] figma-data fetch failed:', e);
                     parent.postMessage({ pluginMessage: { type: 'error', message: e.message } }, '*');
                 }
             }
@@ -44,6 +45,7 @@
                         parent.postMessage({ pluginMessage: { type: 'export-error' } }, '*');
                     }
                 } catch (e) {
+                    console.error('[Plugin Error] figma-frame fetch failed:', e);
                     parent.postMessage({ pluginMessage: { type: 'export-error', message: e.message } }, '*');
                 }
             }
