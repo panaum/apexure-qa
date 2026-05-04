@@ -689,10 +689,11 @@ export async function registerRoutes(app: Express): Promise<void> {
           const content = normalizeForMatching(node.content.trim());
           if (!content || content.length < 2) return { node, elementData: null, skipped: true };
 
-          const elementData = await page.evaluate((searchText) => {
+          // Use a string-based evaluate to completely bypass TSX compiler injection of __name
+          const elementData = await page.evaluate(new Function('searchText', `
             const semanticTags = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'SPAN', 'A', 'BUTTON', 'LI', 'LABEL'];
             
-            const findDeepestTextElement = (el: any, targetText: string) => {
+            const findDeepestTextElement = (el, targetText) => {
               if (semanticTags.includes(el.tagName)) return el;
               for (const tag of semanticTags) {
                 const children = el.querySelectorAll(tag.toLowerCase());
@@ -708,7 +709,7 @@ export async function registerRoutes(app: Express): Promise<void> {
             let bestScore = 0;
 
             for (const el of allElements) {
-              const rawText = (el.textContent || '').replace(/\s+/g, ' ').trim();
+              const rawText = (el.textContent || '').replace(/\\s+/g, ' ').trim();
               if (!rawText) continue;
               let score = 0;
               if (rawText === searchText) score = 100;
@@ -732,7 +733,7 @@ export async function registerRoutes(app: Express): Promise<void> {
               lineHeight: style.lineHeight,
               textContent: actual.textContent.trim(),
             };
-          }, content);
+          `) as any, content);
 
           return { node, content, elementData };
         })
