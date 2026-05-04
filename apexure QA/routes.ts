@@ -5,6 +5,62 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import sharp from "sharp";
 
+// --- COMPARISON HELPERS ---
+function rgbToHex(r: number, g: number, b: number) {
+  const toHex = (v: number) => Math.round(v).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function parseCssColor(colorStr: string) {
+  if (!colorStr) return null;
+  const rgbMatch = colorStr.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+  if (rgbMatch) {
+    return { r: parseInt(rgbMatch[1]), g: parseInt(rgbMatch[2]), b: parseInt(rgbMatch[3]) };
+  }
+  const hexMatch = colorStr.match(/^#([0-9a-f]{6})$/i);
+  if (hexMatch) {
+    const hex = hexMatch[1];
+    return {
+      r: parseInt(hex.substring(0, 2), 16),
+      g: parseInt(hex.substring(2, 4), 16),
+      b: parseInt(hex.substring(4, 6), 16),
+    };
+  }
+  return null;
+}
+
+function normalizeFontWeight(weight: any) {
+  const map: any = { normal: '400', bold: '700', lighter: '300', bolder: '700' };
+  const w = String(weight).toLowerCase().trim();
+  return map[w] || w;
+}
+
+function normalizeFigmaFontWeight(style: any) {
+  if (!style) return '400';
+  const map: any = {
+    thin: '100', extralight: '200', 'extra light': '200', ultralight: '200',
+    light: '300', regular: '400', normal: '400', medium: '500',
+    semibold: '600', 'semi bold': '600', demibold: '600', bold: '700',
+    extrabold: '800', 'extra bold': '800', ultrabold: '800', black: '900', heavy: '900',
+  };
+  const s = String(style).toLowerCase().trim();
+  return map[s] || '400';
+}
+
+function parsePx(value: any) {
+  if (typeof value === 'number') return value;
+  if (!value) return null;
+  const match = String(value).match(/([\d.]+)\s*px/);
+  return match ? parseFloat(match[1]) : null;
+}
+
+function normalizeForMatching(str: string) {
+  return str
+    .replace(/\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // --- FIGMA CACHE ---
 // Caches Figma API responses for 10 minutes to avoid rate limits
 const figmaCache = new Map<string, { data: any; timestamp: number }>();
@@ -550,208 +606,6 @@ async function textGearsSpellCheck(text: string): Promise<any[]> {
   return allIssues;
 }
 
-// --- SMART TYPOGRAPHY HEATMAP ---
-function parseCssColor(colorStr: string) {
-  if (!colorStr) return null;
-  const rgbMatch = colorStr.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-  if (rgbMatch) return { r: parseInt(rgbMatch[1]), g: parseInt(rgbMatch[2]), b: parseInt(rgbMatch[3]) };
-  const hexMatch = colorStr.match(/^#([0-9a-f]{6})$/i);
-  if (hexMatch) {
-    const hex = hexMatch[1];
-    return { r: parseInt(hex.substring(0, 2), 16), g: parseInt(hex.substring(2, 4), 16), b: parseInt(hex.substring(4, 6), 16) };
-  }
-  return null;
-}
-
-function normalizeFontWeight(weight: string | number) {
-  const map: Record<string, string> = { normal: '400', bold: '700', lighter: '300', bolder: '700' };
-  const w = String(weight).toLowerCase().trim();
-  return map[w] || w;
-}
-
-function normalizeFigmaFontWeight(style: string) {
-  if (!style) return '400';
-  const map: Record<string, string> = {
-    thin: '100', extralight: '200', 'extra light': '200', ultralight: '200',
-    light: '300', regular: '400', normal: '400', medium: '500',
-    semibold: '600', 'semi bold:': '600', demibold: '600', bold: '700',
-    extrabold: '800', 'extra bold:': '800', ultrabold: '800', black: '900', heavy: '900',
-  };
-  const s = String(style).toLowerCase().trim();
-  return map[s] || '400';
-}
-
-function parsePx(value: any) {
-  if (typeof value === 'number') return value;
-  if (!value) return null;
-  const match = String(value).match(/([\d.]+)\s*px/);
-  return match ? parseFloat(match[1]) : null;
-}
-
-function normalizeForMatching(str: string) {
-  return str.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-async function generateTypographyHeatmap(page: any, figmaNodes: any[], screenshotBuffer: Buffer) {
-  const textNodes = figmaNodes.filter((n: any) => n.type === 'TEXT' && n.content);
-  
-  const evaluationResults = await Promise.all(
-    textNodes.map(async (node: any) => {
-      const rawContent = node.content.trim();
-      const content = normalizeForMatching(rawContent);
-      if (!content || content.length < 2) return { node, elementData: null, skipped: true };
-
-      const elementData = await page.evaluate((searchText: string) => {
-        const semanticTags = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'SPAN', 'A', 'BUTTON', 'LI', 'LABEL'];
-        function findDeepestTextElement(el: Element, targetText: string) {
-          if (semanticTags.includes(el.tagName)) return el;
-          for (const tag of semanticTags) {
-            const children = el.querySelectorAll(tag.toLowerCase());
-            for (const child of Array.from(children)) {
-              if ((child.textContent || '').trim().includes(targetText.slice(0, 30))) return child;
-            }
-          }
-          return el;
-        }
-        function resolveFontSize(el: Element) {
-          const size = window.getComputedStyle(el).fontSize;
-          if (size.endsWith('px')) return size;
-          const tmp = document.createElement('div');
-          tmp.style.cssText = `font-size:${size};position:absolute;visibility:hidden`;
-          document.body.appendChild(tmp);
-          const resolved = window.getComputedStyle(tmp).fontSize;
-          document.body.removeChild(tmp);
-          return resolved;
-        }
-        const allElements = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, span, div, li, a, button, label, td, th');
-        let bestElement: Element | null = null;
-        let bestScore = 0;
-        for (const el of Array.from(allElements)) {
-          const style = window.getComputedStyle(el);
-          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
-          if (el.children.length > 8) continue;
-          const rawText = (el.textContent || '').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
-          if (!rawText || rawText.length < 2) continue;
-          let score = 0;
-          if (rawText === searchText) { score = 100; }
-          else if (searchText.length > 60 && rawText.includes(searchText.slice(0, 80))) { score = 85; }
-          else if (rawText.includes(searchText)) { score = 70; }
-          else if (searchText.includes(rawText) && rawText.length > 3) { score = (rawText.length / searchText.length) * 60; }
-          if (score > bestScore) { bestScore = score; bestElement = el; }
-          if (score === 100) break;
-        }
-        if (!bestElement || bestScore < 25) return null;
-        const actualElement = findDeepestTextElement(bestElement, searchText);
-        const elStyle = window.getComputedStyle(actualElement);
-        actualElement.setAttribute('data-figma-matched', 'true');
-        const resolvedFontSize = resolveFontSize(actualElement);
-        const r = actualElement.getBoundingClientRect();
-        return {
-          fontSize: resolvedFontSize, fontFamily: elStyle.fontFamily, fontWeight: elStyle.fontWeight,
-          color: elStyle.color, lineHeight: elStyle.lineHeight, textContent: actualElement.textContent?.trim(),
-          matchScore: bestScore, rect: { x: r.x + window.scrollX, y: r.y + window.scrollY, width: r.width, height: r.height }
-        };
-      }, content);
-      return { node, content, elementData };
-    })
-  );
-
-  const mismatches: any[] = [];
-  for (const { node, elementData, skipped } of evaluationResults) {
-    if (skipped) continue;
-    if (!elementData) {
-      mismatches.push({ nodeId: node.id, property: 'missing', status: 'fail' });
-      continue;
-    }
-
-    // CONTENT-ONLY MATCHING
-    if (elementData.matchScore === 100) {
-      // Perfect string match
-      elementData.severity = 0; // Green
-    } else {
-      // Substring, partial, or mismatched string content
-      elementData.severity = 1; // Red
-    }
-  }
-
-  // Double pass to find Extra living elements (YELLOW)
-  const extraElements = await page.evaluate(() => {
-    const allTextElements = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, span, a, button, label, li');
-    const extras = [];
-    for (const el of Array.from(allTextElements)) {
-      if (el.hasAttribute('data-figma-matched')) continue;
-      if (el.hasAttribute('data-figma-unmatched')) continue;
-
-      const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.opacity === '0' || style.visibility === 'hidden') continue;
-
-      const text = (el.textContent || '').trim();
-      if (!text || text.length < 2) continue;
-
-      if (el.closest('[data-figma-matched]') || el.querySelector('[data-figma-matched]')) continue;
-
-      const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) {
-        extras.push({
-          x: r.x + window.scrollX,
-          y: r.y + window.scrollY,
-          width: r.width,
-          height: r.height
-        });
-        el.setAttribute('data-figma-unmatched', 'true');
-      }
-    }
-    return extras;
-  });
-
-  const imgMeta = await sharp(screenshotBuffer).metadata();
-  let svgRects: string[] = [];
-  let severeNodesCount = 0;
-  
-  for (const { node, elementData, skipped } of evaluationResults) {
-    if (skipped) continue;
-
-    // Handle RED missing nodes from Figma
-    if (!elementData) {
-      severeNodesCount++;
-      // Attempt best-effort mapping using node absolute dimensions relative to Figma top level
-      let fallbackX = node.x || 0;
-      let fallbackY = node.y || 0;
-      let w = node.width || 100;
-      let h = node.height || 20;
-      svgRects.push(`<rect x="${fallbackX}" y="${fallbackY}" width="${w}" height="${h}" fill="red" fill-opacity="0.35" stroke="red" stroke-width="2" />`);
-      continue;
-    }
-
-    if (!elementData.rect) continue;
-
-    if (elementData.severity === 0) {
-      // GREEN (Matched perfectly)
-      const { x, y, width, height } = elementData.rect;
-      svgRects.push(`<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="green" fill-opacity="0.15" stroke="green" stroke-width="1.5" />`);
-    } else if (elementData.severity && elementData.severity > 0) {
-      // RED (Mismatch existing)
-      severeNodesCount++;
-      const op = Math.min(elementData.severity * 0.8, 0.5);
-      const { x, y, width, height } = elementData.rect;
-      svgRects.push(`<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="red" fill-opacity="${op}" stroke="red" stroke-width="1.5" />`);
-    }
-  }
-
-  // YELLOW Extra elements
-  for (const ext of extraElements) {
-    svgRects.push(`<rect x="${ext.x}" y="${ext.y}" width="${ext.width}" height="${ext.height}" fill="yellow" fill-opacity="0.4" stroke="#ffeb3b" stroke-width="1.5" />`);
-  }
-
-  let finalBuffer = screenshotBuffer;
-  if (svgRects.length > 0) {
-    const svgImage = `<svg width="${imgMeta.width}" height="${imgMeta.height}">\n${svgRects.join('\n')}\n</svg>`;
-    finalBuffer = await sharp(screenshotBuffer).composite([{ input: Buffer.from(svgImage), blend: 'over' }]).png().toBuffer();
-  }
-
-  return { diffBuffer: finalBuffer, mismatchCount: severeNodesCount, totalCount: textNodes.length };
-}
-
 export async function registerRoutes(app: Express): Promise<void> {
   // --- FIGMA BRIDGE STATE ---
   let latestFigmaData: any = null;
@@ -780,6 +634,129 @@ export async function registerRoutes(app: Express): Promise<void> {
     res.json(data || null);
   });
 
+  // --- NEW: PLUGIN-BASED COMPARISON (DESIGN SENTINEL) ---
+  app.post("/api/compare-sentinel", async (req, res) => {
+    const { url: liveUrl } = req.body;
+    if (!liveUrl) return res.status(400).json({ error: 'Missing "url" in request body' });
+
+    if (!latestFigmaData) {
+      return res.status(400).json({ error: 'No Figma data loaded. Run the Figma plugin first.' });
+    }
+
+    let browser;
+    try {
+      const textNodes = latestFigmaData.nodes.filter((n: any) => n.type === 'TEXT' && n.content);
+      const mismatches: any[] = [];
+
+      browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+
+      const context = await browser.newContext({
+        viewport: { width: 1440, height: 900 },
+      });
+
+      const page = await context.newPage();
+      await page.goto(liveUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+
+      // Parallel evaluation
+      const evaluationResults = await Promise.all(
+        textNodes.map(async (node: any) => {
+          const content = normalizeForMatching(node.content.trim());
+          if (!content || content.length < 2) return { node, elementData: null, skipped: true };
+
+          const elementData = await page.evaluate((searchText) => {
+            const semanticTags = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'SPAN', 'A', 'BUTTON', 'LI', 'LABEL'];
+            
+            function findDeepestTextElement(el: any, targetText: string) {
+              if (semanticTags.includes(el.tagName)) return el;
+              for (const tag of semanticTags) {
+                const children = el.querySelectorAll(tag.toLowerCase());
+                for (const child of children) {
+                  if ((child.textContent || '').trim().includes(targetText.slice(0, 30))) return child;
+                }
+              }
+              return el;
+            }
+
+            const allElements = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, span, div, li, a, button, label');
+            let bestElement = null;
+            let bestScore = 0;
+
+            for (const el of allElements) {
+              const rawText = (el.textContent || '').replace(/\s+/g, ' ').trim();
+              if (!rawText) continue;
+              let score = 0;
+              if (rawText === searchText) score = 100;
+              else if (rawText.includes(searchText)) score = 70;
+
+              if (score > bestScore) {
+                bestScore = score;
+                bestElement = el;
+              }
+              if (score === 100) break;
+            }
+
+            if (!bestElement || bestScore < 25) return null;
+            const actual = findDeepestTextElement(bestElement, searchText);
+            const style = window.getComputedStyle(actual);
+            return {
+              fontSize: style.fontSize,
+              fontFamily: style.fontFamily,
+              fontWeight: style.fontWeight,
+              color: style.color,
+              lineHeight: style.lineHeight,
+              textContent: actual.textContent.trim(),
+            };
+          }, content);
+
+          return { node, content, elementData };
+        })
+      );
+
+      // Process mismatches
+      for (const { node, content, elementData, skipped } of evaluationResults as any) {
+        if (skipped) continue;
+        if (!elementData) {
+          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'element', figmaValue: content, liveValue: 'NOT FOUND', status: 'fail' });
+          continue;
+        }
+
+        if (node.fontSize) {
+          const liveSize = parsePx(elementData.fontSize);
+          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'fontSize', figmaValue: `${node.fontSize}px`, liveValue: `${liveSize}px`, status: liveSize !== node.fontSize ? 'fail' : 'pass' });
+        }
+        if (node.fontFamily) {
+          const liveFamily = elementData.fontFamily.split(',')[0].trim().replace(/['"]/g, '');
+          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'fontFamily', figmaValue: node.fontFamily, liveValue: liveFamily, status: liveFamily.toLowerCase() === node.fontFamily.toLowerCase() ? 'pass' : 'fail' });
+        }
+        if (node.fontWeight) {
+          const liveWeight = normalizeFontWeight(elementData.fontWeight);
+          const figmaWeight = normalizeFigmaFontWeight(node.fontWeight);
+          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'fontWeight', figmaValue: figmaWeight, liveValue: liveWeight, status: liveWeight === figmaWeight ? 'pass' : 'fail' });
+        }
+      }
+
+      res.json({
+        pageName: latestFigmaData.pageName || 'Unknown',
+        url: liveUrl,
+        checkedAt: new Date().toISOString(),
+        total: mismatches.length,
+        passed: mismatches.filter(m => m.status === 'pass').length,
+        failed: mismatches.filter(m => m.status === 'fail').length,
+        warned: mismatches.filter(m => m.status === 'warn').length,
+        mismatches,
+      });
+
+    } catch (err: any) {
+      console.error('[Server] Comparison error:', err.message);
+      res.status(500).json({ error: `Comparison failed: ${err.message}` });
+    } finally {
+      if (browser) await browser.close();
+    }
+  });
 
   app.post("/api/compare", async (req, res) => {
     try {

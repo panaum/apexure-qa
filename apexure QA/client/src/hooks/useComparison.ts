@@ -33,7 +33,7 @@ export function useComparison() {
     setError(null);
 
     try {
-      const res = await fetch('/api/compare', {
+      const res = await fetch('/api/compare-sentinel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: liveUrl }),
