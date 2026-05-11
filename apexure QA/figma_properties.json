@@ -1,0 +1,36 @@
+{
+  "heading": {
+    "fontFamily": "Inter",
+    "fontWeight": "Bold",
+    "fontSize": 32,
+    "lineHeight": { "unit": "PERCENT", "value": 120 },
+    "letterSpacing": { "unit": "PIXELS", "value": -0.5 },
+    "textAlignHorizontal": "CENTER",
+    "textCase": "UPPER",
+    "textDecoration": "NONE",
+    "fills": [
+      {
+        "type": "SOLID",
+        "color": { "r": 0.1, "g": 0.1, "b": 0.1 },
+        "opacity": 1
+      }
+    ]
+  },
+  "paragraph": {
+    "fontFamily": "Inter",
+    "fontWeight": "Regular",
+    "fontSize": 16,
+    "lineHeight": { "unit": "AUTO" },
+    "letterSpacing": { "unit": "PERCENT", "value": 0 },
+    "textAlignHorizontal": "LEFT",
+    "textCase": "ORIGINAL",
+    "textDecoration": "NONE",
+    "fills": [
+      {
+        "type": "SOLID",
+        "color": { "r": 0.3, "g": 0.3, "b": 0.3 },
+        "opacity": 1
+      }
+    ]
+  }
+}

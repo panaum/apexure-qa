@@ -1,4 +1,5 @@
 import express, { type Request, Response, NextFunction } from "express";
+import cors from "cors";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
@@ -36,6 +37,21 @@ app.use(
 );
 
 app.use(express.urlencoded({ limit: '50mb', extended: false }));
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Request Logger Middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(`${new Date().toISOString()} [${req.method}] ${req.url} - ${res.statusCode} (${duration}ms)`);
+  });
+  next();
+});
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -70,12 +86,17 @@ app.use((req, res, next) => {
       log(logLine);
     }
   });
-
   next();
 });
 
 (async () => {
-  await registerRoutes(app);;
+  // Health check endpoint — responds before any middleware can fail
+  app.get('/healthz', (_req, res) => {
+    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+
+  await registerRoutes(app).catch(err => { console.error('[STARTUP] registerRoutes failed:', err); process.exit(1); });
+
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
@@ -89,6 +110,19 @@ app.use((req, res, next) => {
   });
 
   if (process.env.NODE_ENV === "production") {
+    // Log whether dist/public exists and what it contains
+    const path = await import("path");
+    const { fileURLToPath } = await import("url");
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.default.dirname(__filename);
+    const distPath = path.default.resolve(__dirname, "dist", "public");
+    console.log(`[STARTUP] distPath: ${distPath}`);
+    console.log(`[STARTUP] dist/public exists: ${fs.existsSync(distPath)}`);
+    if (fs.existsSync(distPath)) {
+      console.log(`[STARTUP] dist/public contents: ${fs.readdirSync(distPath).join(', ')}`);
+      const indexPath = path.default.resolve(distPath, "index.html");
+      console.log(`[STARTUP] index.html exists: ${fs.existsSync(indexPath)}`);
+    }
     serveStatic(app);
   } else {
     const { setupVite } = await import("./vite-server");;
@@ -96,7 +130,9 @@ app.use((req, res, next) => {
   }
 
   const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.listen(port, "localhost", () => {
-    log(`serving on port ${port}`);
+  // Bind to 0.0.0.0 — Railway routes traffic over IPv4.
+  // "::" (IPv6) can fail on containers where net.ipv6.bindv6only=1
+  httpServer.listen(port, "0.0.0.0", () => {
+    log(`serving on port ${port} (0.0.0.0)`);
   });
 })();

@@ -149,7 +149,7 @@ const Index = () => {
     setPluginFrameStatus('waiting');
     const interval = setInterval(async () => {
       try {
-        const res = await fetch('http://localhost:3333/figma-frame');
+        const res = await fetch('/api/figma-frame');
         if (res.ok) {
           const data = await res.json();
           if (data && data.frameBase64) {

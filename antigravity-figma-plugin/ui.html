@@ -3,14 +3,63 @@
 
 <body>
     <script>
+        const LIVE_URL = "https://apexure-qa-guit.onrender.com";
+
+        async function reportLog(level, message, context = {}) {
+            try {
+                await fetch(`${LIVE_URL}/api/logs`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ level, message, context: { ...context, source: 'figma-plugin' } })
+                });
+            } catch (e) {
+                console.warn("[Plugin] Failed to send log to server:", e);
+            }
+        }
+
+        // Wake up Render as soon as the plugin opens
+        async function wakeUpServer() {
+            console.log("[Plugin] Waking up Render server...");
+            reportLog('INFO', 'Plugin opened, waking up server');
+            try {
+                await fetch(`${LIVE_URL}/api/figma-data`, { method: 'GET' });
+                console.log("[Plugin] Server is awake!");
+                reportLog('INFO', 'Server is awake');
+            } catch (e) {
+                console.warn("[Plugin] Wake up ping failed, but we will try anyway.");
+                reportLog('WARN', 'Server wake up ping failed', { error: e.message });
+            }
+        }
+        wakeUpServer();
+
+        async function liveFetch(path, options) {
+            const url = `${LIVE_URL}/api${path}`;
+            console.log(`[Plugin] Connecting to: ${url}`);
+            
+            // Figma-compatible timeout logic
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 seconds
+
+            try {
+                const response = await fetch(url, {
+                    ...options,
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                return response;
+            } catch (e) {
+                clearTimeout(timeoutId);
+                throw e;
+            }
+        }
+
         window.addEventListener('message', async (event) => {
             const msg = event.data.pluginMessage;
             if (!msg) return;
 
-            // ── Existing: Send Node Data ────────────────────────────────────
             if (msg.type === 'send-data') {
                 try {
-                    const response = await fetch('http://localhost:3333/figma-data', {
+                    const response = await liveFetch('/figma-data', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(msg.payload)
@@ -18,30 +67,35 @@
 
                     if (response.ok) {
                         parent.postMessage({ pluginMessage: { type: 'success' } }, '*');
+                        reportLog('INFO', 'Figma data sent successfully');
                     } else {
-                        parent.postMessage({ pluginMessage: { type: 'error' } }, '*');
+                        throw new Error(`Server responded with ${response.status}`);
                     }
                 } catch (e) {
+                    console.error('[Plugin Error] figma-data failed:', e);
+                    reportLog('ERROR', 'Figma data send failed', { error: e.message });
                     parent.postMessage({ pluginMessage: { type: 'error', message: e.message } }, '*');
                 }
             }
 
-            // ── New: Export Frame (Screenshot Diff) ─────────────────────────
             if (msg.type === 'export-frame') {
                 try {
-                    const { frameBase64, frameName, width, height } = msg.payload;
-                    const response = await fetch('http://localhost:3333/figma-frame', {
+                    const { frameBase64, frameName, width, height, nodes } = msg.payload;
+                    const response = await liveFetch('/figma-frame', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ frameBase64, frameName, width, height })
+                        body: JSON.stringify({ frameBase64, frameName, width, height, nodes })
                     });
 
                     if (response.ok) {
                         parent.postMessage({ pluginMessage: { type: 'export-success' } }, '*');
+                        reportLog('INFO', 'Figma frame exported successfully');
                     } else {
-                        parent.postMessage({ pluginMessage: { type: 'export-error' } }, '*');
+                        throw new Error(`Server responded with ${response.status}`);
                     }
                 } catch (e) {
+                    console.error('[Plugin Error] figma-frame failed:', e);
+                    reportLog('ERROR', 'Figma frame export failed', { error: e.message });
                     parent.postMessage({ pluginMessage: { type: 'export-error', message: e.message } }, '*');
                 }
             }

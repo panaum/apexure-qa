@@ -5,6 +5,62 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 import sharp from "sharp";
 
+// --- COMPARISON HELPERS ---
+function rgbNumbersToHex(r: number, g: number, b: number) {
+  const toHex = (v: number) => Math.round(v).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function parseCssColor(colorStr: string) {
+  if (!colorStr) return null;
+  const rgbMatch = colorStr.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+  if (rgbMatch) {
+    return { r: parseInt(rgbMatch[1]), g: parseInt(rgbMatch[2]), b: parseInt(rgbMatch[3]) };
+  }
+  const hexMatch = colorStr.match(/^#([0-9a-f]{6})$/i);
+  if (hexMatch) {
+    const hex = hexMatch[1];
+    return {
+      r: parseInt(hex.substring(0, 2), 16),
+      g: parseInt(hex.substring(2, 4), 16),
+      b: parseInt(hex.substring(4, 6), 16),
+    };
+  }
+  return null;
+}
+
+function normalizeFontWeight(weight: any) {
+  const map: any = { normal: '400', bold: '700', lighter: '300', bolder: '700' };
+  const w = String(weight).toLowerCase().trim();
+  return map[w] || w;
+}
+
+function normalizeFigmaFontWeight(style: any) {
+  if (!style) return '400';
+  const map: any = {
+    thin: '100', extralight: '200', 'extra light': '200', ultralight: '200',
+    light: '300', regular: '400', normal: '400', medium: '500',
+    semibold: '600', 'semi bold': '600', demibold: '600', bold: '700',
+    extrabold: '800', 'extra bold': '800', ultrabold: '800', black: '900', heavy: '900',
+  };
+  const s = String(style).toLowerCase().trim();
+  return map[s] || '400';
+}
+
+function parsePx(value: any) {
+  if (typeof value === 'number') return value;
+  if (!value) return null;
+  const match = String(value).match(/([\d.]+)\s*px/);
+  return match ? parseFloat(match[1]) : null;
+}
+
+function normalizeForMatching(str: string) {
+  return str
+    .replace(/\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // --- FIGMA CACHE ---
 // Caches Figma API responses for 10 minutes to avoid rate limits
 const figmaCache = new Map<string, { data: any; timestamp: number }>();
@@ -551,6 +607,200 @@ async function textGearsSpellCheck(text: string): Promise<any[]> {
 }
 
 export async function registerRoutes(app: Express): Promise<void> {
+  // --- FIGMA BRIDGE STATE ---
+  let latestFigmaData: any = null;
+  let latestFrameData: any = null;
+  const clientLogs: any[] = [];
+
+  // Receive logs from clients (Figma plugin, Frontend)
+  app.post("/api/logs", (req, res) => {
+    const { level, message, context } = req.body;
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      level: level || 'INFO',
+      message: message || 'No message',
+      context: context || {}
+    };
+    clientLogs.push(logEntry);
+    if (clientLogs.length > 100) clientLogs.shift(); // Keep last 100
+
+    console.log(`[CLIENT-LOG][${logEntry.level}] ${logEntry.message}`, JSON.stringify(logEntry.context));
+    res.json({ ok: true });
+  });
+
+  // Get recent logs (for debugging)
+  app.get("/api/logs", (req, res) => {
+    res.json(clientLogs);
+  });
+
+  // Bridge routes
+  app.post("/api/figma-data", (req, res) => {
+    latestFigmaData = req.body;
+    console.log(`[Bridge] Received data from plugin`);
+    res.status(200).json({ ok: true });
+  });
+
+  app.get("/api/figma-data", (req, res) => {
+    res.json(latestFigmaData || { nodes: [] });
+  });
+
+  app.post("/api/figma-frame", (req, res) => {
+    latestFrameData = req.body;
+    console.log(`[Bridge] Received frame from plugin`);
+    res.status(200).json({ ok: true });
+  });
+
+  app.get("/api/figma-frame", (req, res) => {
+    const data = latestFrameData;
+    latestFrameData = null;
+    res.json(data || null);
+  });
+
+  // --- NEW: PLUGIN-BASED COMPARISON (DESIGN SENTINEL) ---
+  app.post("/api/compare-sentinel", async (req, res) => {
+    const { url: liveUrl } = req.body;
+    if (!liveUrl) return res.status(400).json({ error: 'Missing "url" in request body' });
+
+    if (!latestFigmaData) {
+      return res.status(400).json({ error: 'No Figma data loaded. Run the Figma plugin first.' });
+    }
+
+    let browser;
+    try {
+      const textNodes = latestFigmaData.nodes.filter((n: any) => n.type === 'TEXT' && n.content);
+      const mismatches: any[] = [];
+
+      browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+
+      const context = await browser.newContext({
+        viewport: { width: 1440, height: 900 },
+      });
+
+      const page = await context.newPage();
+      await page.goto(liveUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+
+      // Parallel evaluation
+      const evaluationResults = await Promise.all(
+        textNodes.map(async (node: any) => {
+          const content = normalizeForMatching(node.content.trim());
+          if (!content || content.length < 2) return { node, elementData: null, skipped: true };
+
+          // Use a string-based evaluate to completely bypass TSX compiler injection of __name
+          const elementData = await page.evaluate(new Function('searchText', `
+            const semanticTags = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'SPAN', 'A', 'BUTTON', 'LI', 'LABEL'];
+            
+            const findDeepestTextElement = (el, targetText) => {
+              if (semanticTags.includes(el.tagName)) return el;
+              for (const tag of semanticTags) {
+                const children = el.querySelectorAll(tag.toLowerCase());
+                for (const child of children) {
+                  if ((child.textContent || '').trim().includes(targetText.slice(0, 30))) return child;
+                }
+              }
+              return el;
+            };
+
+            const allElements = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, span, div, li, a, button, label');
+            let bestElement = null;
+            let bestScore = 0;
+
+            for (const el of allElements) {
+              const rawText = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+              if (!rawText) continue;
+              let score = 0;
+              if (rawText === searchText) score = 100;
+              else if (rawText.includes(searchText)) score = 70;
+
+              if (score > bestScore) {
+                bestScore = score;
+                bestElement = el;
+              }
+              if (score === 100) break;
+            }
+
+            if (!bestElement || bestScore < 25) return null;
+            const actual = findDeepestTextElement(bestElement, searchText);
+            const style = window.getComputedStyle(actual);
+            return {
+              fontSize: style.fontSize,
+              fontFamily: style.fontFamily,
+              fontWeight: style.fontWeight,
+              color: style.color,
+              lineHeight: style.lineHeight,
+              textContent: actual.textContent.trim(),
+            };
+          `) as any, content);
+
+          return { node, content, elementData };
+        })
+      );
+
+      // Process mismatches
+      for (const { node, content, elementData, skipped } of evaluationResults as any) {
+        if (skipped) continue;
+
+        if (!elementData) {
+          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'element', figmaValue: content, liveValue: 'NOT FOUND', status: 'fail' });
+          continue;
+        }
+
+        // Compare color
+        if (node.fills && node.fills.length > 0 && node.fills[0] && node.fills[0].color) {
+          const figmaColor = node.fills[0].color;
+          const figmaHex = rgbNumbersToHex(figmaColor.r, figmaColor.g, figmaColor.b);
+          const liveColor = parseCssColor(elementData.color);
+          if (liveColor) {
+            const liveHex = rgbNumbersToHex(liveColor.r, liveColor.g, liveColor.b);
+            const dr = Math.abs(figmaColor.r - liveColor.r);
+            const dg = Math.abs(figmaColor.g - liveColor.g);
+            const db = Math.abs(figmaColor.b - liveColor.b);
+            let status = 'pass';
+            if (dr > 2 || dg > 2 || db > 2) status = 'fail';
+            else if (dr > 0 || dg > 0 || db > 0) status = 'warn';
+            mismatches.push({
+              nodeId: node.id, nodeName: node.name, property: 'color',
+              figmaValue: figmaHex, liveValue: liveHex, status,
+            });
+          }
+        }
+
+        if (node.fontSize) {
+          const liveSize = parsePx(elementData.fontSize);
+          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'fontSize', figmaValue: `${node.fontSize}px`, liveValue: `${liveSize}px`, status: liveSize !== node.fontSize ? 'fail' : 'pass' });
+        }
+        if (node.fontFamily) {
+          const liveFamily = elementData.fontFamily ? elementData.fontFamily.split(',')[0].trim().replace(/['"]/g, '') : 'Unknown';
+          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'fontFamily', figmaValue: node.fontFamily, liveValue: liveFamily, status: liveFamily.toLowerCase() === node.fontFamily.toLowerCase() ? 'pass' : 'fail' });
+        }
+        if (node.fontWeight) {
+          const liveWeight = normalizeFontWeight(elementData.fontWeight);
+          const figmaWeight = normalizeFigmaFontWeight(node.fontWeight);
+          mismatches.push({ nodeId: node.id, nodeName: node.name, property: 'fontWeight', figmaValue: figmaWeight, liveValue: liveWeight, status: liveWeight === figmaWeight ? 'pass' : 'fail' });
+        }
+      }
+
+      res.json({
+        pageName: latestFigmaData.pageName || 'Unknown',
+        url: liveUrl,
+        checkedAt: new Date().toISOString(),
+        total: mismatches.length,
+        passed: mismatches.filter(m => m.status === 'pass').length,
+        failed: mismatches.filter(m => m.status === 'fail').length,
+        warned: mismatches.filter(m => m.status === 'warn').length,
+        mismatches,
+      });
+
+    } catch (err: any) {
+      console.error('[Server] Comparison error:', err.message);
+      res.status(500).json({ error: `Comparison failed: ${err.message}` });
+    } finally {
+      if (browser) await browser.close();
+    }
+  });
 
   app.post("/api/compare", async (req, res) => {
     try {
@@ -994,13 +1244,12 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Step 1: Get Figma frame image — from request body or bridge server
       let figmaImageBuffer: Buffer;
       let frameName: string | null = null;
+      let figmaNodes: any[] | null = null;
 
       if (figmaFrameBase64) {
-        // Strip data URI prefix if present
         const raw = figmaFrameBase64.replace(/^data:image\/\w+;base64,/, '');
         figmaImageBuffer = Buffer.from(raw, 'base64');
       } else {
-        // Try fetching from bridge server
         try {
           const bridgeRes = await fetch('http://localhost:3333/figma-frame');
           if (bridgeRes.ok) {
@@ -1008,6 +1257,7 @@ export async function registerRoutes(app: Express): Promise<void> {
             if (bridgeData && bridgeData.frameBase64) {
               figmaImageBuffer = Buffer.from(bridgeData.frameBase64, 'base64');
               frameName = bridgeData.frameName || null;
+              figmaNodes = bridgeData.nodes || null;
             } else {
               return res.status(400).json({ message: "Please export a frame from Figma plugin or upload an image" });
             }
@@ -1022,6 +1272,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Step 2: Screenshot the live page with Playwright
       const VIEWPORT = { width: 1440, height: 900 };
       let liveScreenshotBuffer: Buffer;
+      
       const browser = await chromium.launch({ headless: true });
       try {
         const context = await browser.newContext({
@@ -1032,42 +1283,56 @@ export async function registerRoutes(app: Express): Promise<void> {
         await page.goto(webUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
         await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
         liveScreenshotBuffer = Buffer.from(await page.screenshot({ fullPage: true, type: 'png' }));
+        
+        // --- SMART HEATMAP INTEGRATION ---
+        if (figmaNodes && figmaNodes.length > 0) {
+          try {
+            const heatmapResult = await generateTypographyHeatmap(page, figmaNodes, liveScreenshotBuffer);
+            const targetWidth = VIEWPORT.width;
+            const targetHeight = VIEWPORT.height;
+            const figmaResized = await sharp(figmaImageBuffer).resize(targetWidth, targetHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } }).png().toBuffer();
+            const liveResized = await sharp(liveScreenshotBuffer).resize(targetWidth, targetHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } }).png().toBuffer();
+            
+            const diffPercentage = heatmapResult.totalCount > 0 ? parseFloat(((heatmapResult.mismatchCount / heatmapResult.totalCount) * 100).toFixed(2)) : 0;
+            
+            return res.json({
+              figmaImage: `data:image/png;base64,${figmaResized.toString('base64')}`,
+              liveImage: `data:image/png;base64,${liveResized.toString('base64')}`,
+              diffImage: `data:image/png;base64,${heatmapResult.diffBuffer.toString('base64')}`,
+              mismatchPercentage: diffPercentage,
+              mismatchPixels: heatmapResult.mismatchCount,
+              totalPixels: heatmapResult.totalCount,
+              viewport: `${targetWidth}x${targetHeight}`,
+              aiExplanation: `Found ${heatmapResult.mismatchCount} Typography property discrepancies out of ${heatmapResult.totalCount} evaluated text nodes.`,
+              frameName: frameName || null,
+            });
+          } catch (e) {
+            console.error('[Smart Heatmap] Generation failed, falling back to pixelmatch.', e);
+          }
+        }
       } finally {
         await browser.close();
       }
 
-      // Step 3: Resize both images to the same dimensions using sharp
+      // Step 3: Fallback (pixelmatch) if no nodes found or smart heatmap failed
       const liveMeta = await sharp(liveScreenshotBuffer).metadata();
       const targetWidth = liveMeta.width!;
       const targetHeight = liveMeta.height!;
 
-      const figmaResized = await sharp(figmaImageBuffer)
-        .resize(targetWidth, targetHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
-        .png()
-        .toBuffer();
+      const figmaResized = await sharp(figmaImageBuffer).resize(targetWidth, targetHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } }).png().toBuffer();
+      const liveResized = await sharp(liveScreenshotBuffer).resize(targetWidth, targetHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } }).png().toBuffer();
 
-      const liveResized = await sharp(liveScreenshotBuffer)
-        .resize(targetWidth, targetHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
-        .png()
-        .toBuffer();
-
-      // Step 4: Decode PNGs and run pixelmatch
       const figmaPng = PNG.sync.read(figmaResized);
       const livePng = PNG.sync.read(liveResized);
       const diffPng = new PNG({ width: targetWidth, height: targetHeight });
 
       const mismatchPixels = pixelmatch(
-        figmaPng.data,
-        livePng.data,
-        diffPng.data,
-        targetWidth,
-        targetHeight,
+        figmaPng.data, livePng.data, diffPng.data, targetWidth, targetHeight,
         { threshold: 0.1, diffColor: [255, 0, 0] }
       );
 
       const totalPixels = targetWidth * targetHeight;
       const mismatchPercentage = parseFloat(((mismatchPixels / totalPixels) * 100).toFixed(2));
-
       const diffBuffer = PNG.sync.write(diffPng);
 
       // Step 5: AI explanation via OpenRouter if mismatch > 2%

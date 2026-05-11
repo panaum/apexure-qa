@@ -1,4 +1,6 @@
 const { chromium } = require('playwright');
+const sharp = require('sharp');
+
 
 function rgbToHex(r, g, b) {
   const toHex = (v) => Math.round(v).toString(16).padStart(2, '0');
@@ -195,6 +197,14 @@ async function compare(figmaPayload, liveUrl) {
           const elStyle = window.getComputedStyle(actualElement);
           const resolvedFontSize = resolveFontSize(actualElement);
 
+          const r = actualElement.getBoundingClientRect();
+          const docRect = {
+            x: r.x + window.scrollX,
+            y: r.y + window.scrollY,
+            width: r.width,
+            height: r.height,
+          };
+
           return {
             fontSize: resolvedFontSize,
             fontFamily: elStyle.fontFamily,
@@ -203,6 +213,7 @@ async function compare(figmaPayload, liveUrl) {
             lineHeight: elStyle.lineHeight,
             textContent: actualElement.textContent.trim(),
             matchScore: bestScore,
+            rect: docRect,
           };
         }, content);
 
@@ -297,6 +308,56 @@ async function compare(figmaPayload, liveUrl) {
           });
         }
       }
+      // Severity computation for heatmap
+      let propsChecked = 0;
+      let propsFailed = 0;
+
+      // Ensure we only tally exactly the 5 target properties:
+      [ 'fontSize', 'fontFamily', 'fontWeight', 'color', 'lineHeight' ].forEach(prop => {
+        const result = mismatches.find(m => m.nodeId === node.id && m.property === prop);
+        if (result) {
+          propsChecked++;
+          if (result.status === 'fail' || result.status === 'warn') {
+            propsFailed++;
+          }
+        }
+      });
+      
+      // Calculate severity
+      if (propsChecked > 0 && propsFailed > 0 && elementData.rect) {
+        elementData.severity = propsFailed / propsChecked;
+      }
+    }
+    
+    // ── GENERATE HEATMAP OVERLAY ─────────────────────────────
+    try {
+      const screenshotBuffer = await page.screenshot({ fullPage: true });
+      const imgMeta = await sharp(screenshotBuffer).metadata();
+      
+      let svgRects = [];
+      for (const { elementData } of evaluationResults) {
+        if (!elementData || !elementData.severity || !elementData.rect) continue;
+        const op = Math.min(elementData.severity * 0.8, 0.8); // Scale opacity
+        const { x, y, width, height } = elementData.rect;
+        // SVG rect mapped exactly to the element bounding box
+        svgRects.push(`<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="red" fill-opacity="${op}" />`);
+      }
+
+      if (svgRects.length > 0) {
+        const svgImage = `<svg width="${imgMeta.width}" height="${imgMeta.height}">
+          ${svgRects.join('\n')}
+        </svg>`;
+        
+        await sharp(screenshotBuffer)
+          .composite([{ input: Buffer.from(svgImage), blend: 'over' }])
+          .png()
+          .toFile('text_mismatch_heatmap.png');
+        console.log('[Compare] text_mismatch_heatmap.png successfully generated.');
+      } else {
+        console.log('[Compare] No text discrepancies found... Skipping heatmap.');
+      }
+    } catch (e) {
+      console.error('[Compare] Heatmap generation failed:', e);
     }
 
   } finally {

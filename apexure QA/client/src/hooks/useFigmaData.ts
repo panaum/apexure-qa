@@ -43,7 +43,7 @@ export function useFigmaData() {
 
     intervalRef.current = setInterval(async () => {
       try {
-        const res = await fetch('http://localhost:3333/figma-data');
+        const res = await fetch('/api/figma-data');
         if (!res.ok) throw new Error('Bridge not responding');
         const data = await res.json();
         if (data && data.nodes) {

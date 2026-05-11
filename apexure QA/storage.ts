@@ -1,7 +1,13 @@
 import { db } from "./db";
-// Change the line below from "@shared/schema" to "./db"
-import { comparisons, figmaFrames, webPages, type CreateComparisonInput, type Comparison, type InsertFigmaFrame, type FigmaFrame, type InsertWebPage, type WebPage } from "@shared/schema";
+import { comparisons, figmaFrames, webPages, type CreateComparisonInput, type Comparison, type InsertFigmaFrame, type FigmaFrame, type InsertWebPage, type WebPage } from "./shared/schema";
 import { desc, eq } from "drizzle-orm";
+
+// Helper: throws a clear error if DATABASE_URL is not configured
+function getDb() {
+  if (!db) throw new Error('Database is not configured. Please set the DATABASE_URL environment variable in Railway.');
+  return db;
+}
+
 export interface IStorage {
   createComparison(comparison: CreateComparisonInput): Promise<Comparison>;
   getHistory(): Promise<Comparison[]>;
@@ -15,7 +21,7 @@ export interface IStorage {
 
 export class DatabaseStorage implements IStorage {
   async createComparison(input: CreateComparisonInput): Promise<Comparison> {
-    const [comparison] = await db
+    const [comparison] = await getDb()
       .insert(comparisons)
       .values(input)
       .returning();
@@ -23,14 +29,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getHistory(): Promise<Comparison[]> {
-    return await db
+    return await getDb()
       .select()
       .from(comparisons)
       .orderBy(desc(comparisons.createdAt));
   }
 
   async saveFrame(input: InsertFigmaFrame): Promise<FigmaFrame> {
-    const [frame] = await db
+    const [frame] = await getDb()
       .insert(figmaFrames)
       .values(input)
       .returning();
@@ -38,7 +44,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getFramesByFileKey(fileKey: string): Promise<FigmaFrame[]> {
-    return await db
+    return await getDb()
       .select()
       .from(figmaFrames)
       .where(eq(figmaFrames.fileKey, fileKey))
@@ -46,11 +52,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteFramesByFileKey(fileKey: string): Promise<void> {
-    await db.delete(figmaFrames).where(eq(figmaFrames.fileKey, fileKey));
+    await getDb().delete(figmaFrames).where(eq(figmaFrames.fileKey, fileKey));
   }
 
   async saveWebPage(input: InsertWebPage): Promise<WebPage> {
-    const [page] = await db
+    const [page] = await getDb()
       .insert(webPages)
       .values(input)
       .returning();
@@ -58,7 +64,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getWebPageByUrl(url: string): Promise<WebPage | null> {
-    const results = await db
+    const results = await getDb()
       .select()
       .from(webPages)
       .where(eq(webPages.url, url))
@@ -68,7 +74,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteWebPageByUrl(url: string): Promise<void> {
-    await db.delete(webPages).where(eq(webPages.url, url));
+    await getDb().delete(webPages).where(eq(webPages.url, url));
   }
 }
 

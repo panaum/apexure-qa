@@ -41,7 +41,7 @@ export function useAccessibility() {
     setResult(null);
 
     try {
-      const response = await fetch('http://localhost:3334/accessibility', {
+      const response = await fetch('/api/accessibility', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
