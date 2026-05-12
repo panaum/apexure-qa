@@ -8,7 +8,7 @@ import QAPanel from "@/components/QAPanel";
 import AccessibilityPanel from "@/components/AccessibilityPanel";
 import { toast } from "sonner";
 import { useSEORecommendations } from "@/hooks/useSEORecommendations";
-type ActiveTab = "compare" | "screenshotdiff" | "spellcheck" | "seo" | "techstack" | "pagespeed" | "designsentinel" | "accessibility";
+type ActiveTab = "compare" | "screenshotdiff" | "spellcheck" | "seo" | "techstack" | "pagespeed" | "linkauditor" | "designsentinel" | "accessibility";
 const Index = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("compare");
 
@@ -288,6 +288,12 @@ const Index = () => {
             className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "pagespeed" ? "bg-primary text-white shadow" : "text-muted-foreground hover:text-white"}`}
           >
             PageSpeed
+          </button>
+          <button
+            onClick={() => setActiveTab("linkauditor")}
+            className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "linkauditor" ? "bg-primary text-white shadow" : "text-muted-foreground hover:text-white"}`}
+          >
+            🔗 Link Auditor
           </button>
           <button
             onClick={() => setActiveTab("designsentinel")}
@@ -1120,6 +1126,21 @@ const Index = () => {
             setPsiResults={setPsiResults}
             isPsiLoading={isPsiLoading}
             setIsPsiLoading={setIsPsiLoading}
+          />
+        )}
+
+        {/* ===== LINK AUDITOR TAB ===== */}
+        {activeTab === "linkauditor" && (
+          <iframe
+            src="https://brokenlinkchecker-olive.vercel.app"
+            title="Link Auditor"
+            style={{
+              width: '100%',
+              height: '900px',
+              border: 'none',
+              borderRadius: '0.75rem',
+              display: 'block',
+            }}
           />
         )}
 
